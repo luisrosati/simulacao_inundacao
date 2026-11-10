@@ -431,7 +431,7 @@ export default function App() {
             )}
           </aside>
 
-          {/* Seção do Mapa */}
+{/* Seção do Mapa */}
           <main className="flex-1 h-full relative">
               {!carregando && (
                 <CamadaBolinhasDeckGL
@@ -441,7 +441,6 @@ export default function App() {
                 />
               )}
 
-              {/* Balão de Inspeção ao clicar em uma bolinha */}
               {pontoSelecionado && (
                 <InfoWindow
                   position={{
