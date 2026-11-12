@@ -33,6 +33,7 @@ jobs:
         env:
           VITE_GOOGLE_MAPS_API_KEY: ${{ secrets.VITE_GOOGLE_MAPS_API_KEY }}
           VITE_GCS_GEOJSON_URL: ${{ secrets.VITE_GCS_GEOJSON_URL }}
+          VITE_GCS_DNIT_URL: ${{ secrets.VITE_GCS_DNIT_URL }}
         run: npm run build
 
       - name: Preparar artefato para o GitHub Pages
