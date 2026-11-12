@@ -45,6 +45,13 @@ interface GeoFeature {
     inclinacao_graus?: number;
     nome_subbacia_n6?: string;
     descricao_estabelecimento?: string;
+    vl_br?: string | number;
+    nm_tipo_tr?: string;
+    ds_local_i?: string;
+    ds_local_f?: string;
+    vl_km_inic?: string | number;
+    vl_km_fina?: string | number;
+    ds_superfi?: string;
     _camadaOrigem?: string;
     [key: string]: any;
   };
@@ -377,7 +384,8 @@ export default function App() {
       if (incValida < inclinacaoMin || incValida > inclinacaoMax) return false;
 
       if (termo !== '') {
-        const textoBusca = `${p.descricao_estabelecimento || ''} ${p.vl_codigo || ''} ${p.nm_tipo_tr || ''} ${cat}`.toLowerCase();
+        const brFormatada = p.vl_br ? `br-${p.vl_br} br ${p.vl_br}` : '';
+        const textoBusca = `${p.descricao_estabelecimento || ''} ${brFormatada} ${p.nm_tipo_tr || ''} ${p.ds_local_i || ''} ${p.ds_local_f || ''} ${p.ds_superfi || ''} ${cat}`.toLowerCase();
         if (!textoBusca.includes(termo)) return false;
       }
 
@@ -422,6 +430,12 @@ export default function App() {
     const num = Number(val);
     if (isNaN(num)) return '—';
     return num > TETO_ALTURA_HAND ? `30 m (original: ${num} m)` : `${num} m`;
+  };
+
+  const formatarKm = (val: any) => {
+    if (val === undefined || val === null || val === '') return '—';
+    const num = Number(val);
+    return isNaN(num) ? String(val) : num.toLocaleString('pt-BR', { maximumFractionDigits: 2 });
   };
 
   return (
@@ -519,7 +533,7 @@ export default function App() {
                       type="text"
                       value={buscaPalavraChave}
                       onChange={(e) => setBuscaPalavraChave(e.target.value)}
-                      placeholder="Ex: hospital, BR-470, ponte, escola..."
+                      placeholder="Ex: hospital, BR-470, Blumenau, pavimentada..."
                       className="w-full pl-3 pr-8 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:border-blue-500"
                     />
                     {buscaPalavraChave && (
@@ -680,20 +694,62 @@ export default function App() {
                   <div className="p-1 max-w-xs text-slate-800 text-xs space-y-1.5">
                     <div className="flex items-center justify-between gap-2 border-b border-slate-200 pb-1">
                       <span className="font-bold text-sm text-slate-900">
-                        {selecionado.feature.properties?.categoria ||
-                          selecionado.feature.properties?._camadaOrigem ||
-                          'Registro'}
+                        {selecionado.feature.properties?._camadaOrigem === 'Rodovias DNIT' &&
+                        selecionado.feature.properties?.vl_br
+                          ? `BR-${selecionado.feature.properties.vl_br}`
+                          : selecionado.feature.properties?.categoria ||
+                            selecionado.feature.properties?._camadaOrigem ||
+                            'Registro'}
                       </span>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-medium">
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-medium shrink-0">
                         {selecionado.feature.properties?._camadaOrigem}
                       </span>
                     </div>
+
                     {selecionado.feature.properties?.descricao_estabelecimento && (
                       <p className="text-slate-600 font-medium">
                         {selecionado.feature.properties.descricao_estabelecimento}
                       </p>
                     )}
-                    <div className="grid grid-cols-2 gap-x-3 gap-y-1 pt-1 text-[11px]">
+
+                    {selecionado.feature.properties?._camadaOrigem === 'Rodovias DNIT' && (
+                      <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 py-1.5 border-b border-slate-100 text-[11px]">
+                        <span className="text-slate-500">Rodovia (vl_br):</span>
+                        <span className="font-semibold">
+                          {selecionado.feature.properties?.vl_br
+                            ? `BR-${selecionado.feature.properties.vl_br}`
+                            : '—'}
+                        </span>
+
+                        <span className="text-slate-500">Tipo de trecho:</span>
+                        <span className="font-semibold">
+                          {selecionado.feature.properties?.nm_tipo_tr || '—'}
+                        </span>
+
+                        <span className="text-slate-500">Início:</span>
+                        <span className="font-semibold">
+                          {selecionado.feature.properties?.ds_local_i || '—'}
+                        </span>
+
+                        <span className="text-slate-500">Fim:</span>
+                        <span className="font-semibold">
+                          {selecionado.feature.properties?.ds_local_f || '—'}
+                        </span>
+
+                        <span className="text-slate-500">Quilometragem:</span>
+                        <span className="font-semibold">
+                          km {formatarKm(selecionado.feature.properties?.vl_km_inic)} ao km{' '}
+                          {formatarKm(selecionado.feature.properties?.vl_km_fina)}
+                        </span>
+
+                        <span className="text-slate-500">Superfície:</span>
+                        <span className="font-semibold">
+                          {selecionado.feature.properties?.ds_superfi || '—'}
+                        </span>
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 pt-0.5 text-[11px]">
                       <span className="text-slate-500">Altura sobre o rio:</span>
                       <span className="font-semibold">
                         {alturaExibidaPonto(selecionado.feature.properties?.altura_min_acima_do_rio_m)}
