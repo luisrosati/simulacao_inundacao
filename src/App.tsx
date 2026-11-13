@@ -1,5 +1,12 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { APIProvider, Map as MapaGoogle, useMap, InfoWindow } from '@vis.gl/react-google-maps';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
+import {
+  APIProvider,
+  Map as MapaGoogle,
+  useMap,
+  useMapsLibrary,
+  InfoWindow,
+  Marker,
+} from '@vis.gl/react-google-maps';
 import { GoogleMapsOverlay } from '@deck.gl/google-maps';
 import { GeoJsonLayer } from '@deck.gl/layers';
 import {
@@ -13,6 +20,9 @@ import {
   ArrowUpFromLine,
   Building2,
   Route,
+  Navigation,
+  Eye,
+  X,
 } from 'lucide-react';
 
 const GCS_EMPRESAS_URL = import.meta.env.VITE_GCS_GEOJSON_URL as string;
@@ -23,8 +33,8 @@ const GOOGLE_MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string;
 const TETO_ALTURA_HAND = 30;
 
 const CORES_FIXAS_RODOVIAS: Record<string, [number, number, number]> = {
-  'Rodovia Federal': [234, 88, 12],   // Laranja intenso
-  'Rodovia Estadual': [124, 58, 237], // Roxo / Violeta
+  'Rodovia Federal': [234, 88, 12],
+  'Rodovia Estadual': [124, 58, 237],
 };
 
 const PALETA_CORES_EMPRESAS: [number, number, number][] = [
@@ -89,6 +99,12 @@ interface SelecaoMapa {
   lng: number;
 }
 
+interface LocalPesquisado {
+  lat: number;
+  lng: number;
+  endereco: string;
+}
+
 function extrairPrimeiroPonto(coords: any): [number, number] {
   if (!Array.isArray(coords)) return [-49.066, -26.9187];
   if (typeof coords[0] === 'number' && typeof coords[1] === 'number') {
@@ -99,18 +115,18 @@ function extrairPrimeiroPonto(coords: any): [number, number] {
 
 function obterCategoriaItem(p: Record<string, any>): string {
   if (p._camadaOrigem === 'Malha Rodoviária') {
-    const jurBruta = p.tipo_jurisdicao !== undefined && p.tipo_jurisdicao !== null
-      ? String(p.tipo_jurisdicao).trim()
-      : '';
+    const jurBruta =
+      p.tipo_jurisdicao !== undefined && p.tipo_jurisdicao !== null
+        ? String(p.tipo_jurisdicao).trim()
+        : '';
     const jur = jurBruta.toLowerCase();
     if (jur.includes('fed')) return 'Rodovia Federal';
     if (jur.includes('est')) return 'Rodovia Estadual';
     if (jurBruta !== '') return `Rodovia (${jurBruta})`;
     return 'Rodovia (Outras)';
   }
-  const catBruta = p.categoria !== undefined && p.categoria !== null
-    ? String(p.categoria).trim()
-    : '';
+  const catBruta =
+    p.categoria !== undefined && p.categoria !== null ? String(p.categoria).trim() : '';
   return catBruta !== '' ? catBruta : 'Não classificado';
 }
 
@@ -118,6 +134,227 @@ function obterSubbaciaItem(p: Record<string, any>): string {
   const valor = p.nome_subbacia_n6 ?? p.subbacia_n6;
   if (valor === undefined || valor === null) return '';
   return String(valor).trim();
+}
+
+function BotaoAbrirStreetView({ lat, lng }: { lat: number; lng: number }) {
+  const map = useMap();
+  const streetViewLib = useMapsLibrary('streetView');
+  const [msgIndisponivel, setMsgIndisponivel] = useState(false);
+
+  const abrirPanorama = useCallback(() => {
+    if (!map || !streetViewLib) return;
+    setMsgIndisponivel(false);
+
+    const svService = new streetViewLib.StreetViewService();
+    svService.getPanorama(
+      { location: { lat, lng }, radius: 80 },
+      (data, status) => {
+        if (status === 'OK' && data?.location?.latLng) {
+          const panorama = map.getStreetView();
+          panorama.setPosition(data.location.latLng);
+          panorama.setPov({ heading: 0, pitch: 0 });
+          panorama.setVisible(true);
+        } else {
+          setMsgIndisponivel(true);
+        }
+      }
+    );
+  }, [map, streetViewLib, lat, lng]);
+
+  return (
+    <div className="pt-1.5 mt-1 border-t border-slate-100">
+      <button
+        type="button"
+        onClick={abrirPanorama}
+        className="w-full flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-white text-[11px] font-semibold transition-colors cursor-pointer"
+      >
+        <Eye className="w-3.5 h-3.5 text-amber-400" />
+        Abrir Street View neste ponto
+      </button>
+      {msgIndisponivel && (
+        <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 mt-1 text-center">
+          Sem cobertura do Street View num raio de 80 m deste ponto.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function BuscaEnderecoGoogle({
+  aoEncontrarLocal,
+  aoLimparLocal,
+  possuiMarcador,
+}: {
+  aoEncontrarLocal: (local: LocalPesquisado) => void;
+  aoLimparLocal: () => void;
+  possuiMarcador: boolean;
+}) {
+  const map = useMap();
+  const placesLib = useMapsLibrary('places');
+  const geocodingLib = useMapsLibrary('geocoding');
+
+  const [texto, setTexto] = useState('');
+  const [sugestoes, setSugestoes] = useState<any[]>([]);
+  const [aberto, setAberto] = useState(false);
+  const tokenRef = useRef<any>(null);
+  const reqIdRef = useRef(0);
+
+  const obterToken = () => {
+    if (!tokenRef.current && placesLib) {
+      const PlacesAny = placesLib as any;
+      if (PlacesAny.AutocompleteSessionToken) {
+        tokenRef.current = new PlacesAny.AutocompleteSessionToken();
+      }
+    }
+    return tokenRef.current;
+  };
+
+  const buscarSugestoes = async (valor: string) => {
+    setTexto(valor);
+    const consulta = valor.trim();
+    if (consulta.length < 3 || !placesLib) {
+      setSugestoes([]);
+      setAberto(false);
+      return;
+    }
+
+    const PlacesAny = placesLib as any;
+    if (!PlacesAny.AutocompleteSuggestion?.fetchAutocompleteSuggestions) return;
+
+    const reqAtual = ++reqIdRef.current;
+    try {
+      const boundsItajai = new google.maps.LatLngBounds(
+        { lat: -27.9, lng: -50.5 },
+        { lat: -26.2, lng: -48.3 }
+      );
+
+      const { suggestions } =
+        await PlacesAny.AutocompleteSuggestion.fetchAutocompleteSuggestions({
+          input: consulta,
+          sessionToken: obterToken(),
+          includedRegionCodes: ['br'],
+          locationBias: boundsItajai,
+          language: 'pt-BR',
+        });
+
+      if (reqAtual !== reqIdRef.current) return;
+      setSugestoes(suggestions || []);
+      setAberto((suggestions || []).length > 0);
+    } catch (err) {
+      console.error('Erro ao buscar sugestões Places API (New):', err);
+    }
+  };
+
+  const selecionarSugestao = async (sugestao: any) => {
+    try {
+      const predicao = sugestao.placePrediction;
+      if (!predicao) return;
+
+      const place = predicao.toPlace();
+      await place.fetchFields({
+        fields: ['formattedAddress', 'location', 'viewport'],
+      });
+
+      tokenRef.current = null;
+      setSugestoes([]);
+      setAberto(false);
+
+      if (!place.location || !map) return;
+      const lat = place.location.lat();
+      const lng = place.location.lng();
+      const label = place.formattedAddress || predicao.text?.toString() || texto;
+
+      if (place.viewport) {
+        map.fitBounds(place.viewport);
+      } else {
+        map.panTo({ lat, lng });
+        map.setZoom(16);
+      }
+
+      setTexto(label);
+      aoEncontrarLocal({ lat, lng, endereco: label });
+    } catch (err) {
+      console.error('Erro ao carregar detalhes do endereço:', err);
+    }
+  };
+
+  const buscarPorEnter = (e: React.FormEvent) => {
+    e.preventDefault();
+    setAberto(false);
+    const consulta = texto.trim();
+    if (!consulta || !geocodingLib || !map) return;
+
+    const geocoder = new geocodingLib.Geocoder();
+    geocoder.geocode({ address: consulta, region: 'BR' }, (results, status) => {
+      if (status === 'OK' && results && results[0]?.geometry?.location) {
+        const loc = results[0].geometry.location;
+        const lat = loc.lat();
+        const lng = loc.lng();
+        if (results[0].geometry.viewport) {
+          map.fitBounds(results[0].geometry.viewport);
+        } else {
+          map.panTo({ lat, lng });
+          map.setZoom(16);
+        }
+        setTexto(results[0].formatted_address);
+        aoEncontrarLocal({ lat, lng, endereco: results[0].formatted_address });
+      }
+    });
+  };
+
+  return (
+    <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 w-80 sm:w-96 max-w-[calc(100%-9rem)]">
+      <form onSubmit={buscarPorEnter}>
+        <div className="relative flex items-center bg-white rounded-lg shadow-md border border-slate-200 focus-within:ring-2 focus-within:ring-blue-500/40 focus-within:border-blue-500">
+          <Navigation className="w-4 h-4 text-blue-600 ml-3 shrink-0" />
+          <input
+            type="text"
+            value={texto}
+            onChange={(e) => buscarSugestoes(e.target.value)}
+            onFocus={() => sugestoes.length > 0 && setAberto(true)}
+            placeholder="Pesquisar endereço ou município no Google Maps..."
+            className="w-full px-2.5 py-2 text-xs sm:text-sm text-slate-800 bg-transparent focus:outline-none"
+          />
+          {(texto || possuiMarcador) && (
+            <button
+              type="button"
+              onClick={() => {
+                setTexto('');
+                setSugestoes([]);
+                setAberto(false);
+                aoLimparLocal();
+              }}
+              className="p-1.5 mr-1 text-slate-400 hover:text-slate-600 cursor-pointer"
+              title="Limpar endereço"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+      </form>
+
+      {aberto && sugestoes.length > 0 && (
+        <ul className="mt-1 bg-white rounded-lg shadow-lg border border-slate-200 max-h-60 overflow-y-auto divide-y divide-slate-100 text-xs text-slate-700">
+          {sugestoes.map((s, idx) => {
+            const label = s.placePrediction?.text?.toString() || 'Endereço sugerido';
+            return (
+              <li
+                key={s.placePrediction?.placeId || idx}
+                onClick={() => selecionarSugestao(s)}
+                className="px-3 py-2 hover:bg-blue-50 cursor-pointer flex items-center gap-2 transition-colors"
+              >
+                <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                <span className="truncate">{label}</span>
+              </li>
+            );
+          })}
+          <li className="px-3 py-1 text-[10px] text-right text-slate-400 bg-slate-50 select-none">
+            Google Maps
+          </li>
+        </ul>
+      )}
+    </div>
+  );
 }
 
 function BarraIntervaloDuplo({
@@ -264,7 +501,9 @@ function CamadasDeckGL({
           },
           onClick: (info: any) => {
             if (info.object) {
-              const [lngFallback, latFallback] = extrairPrimeiroPonto(info.object.geometry?.coordinates);
+              const [lngFallback, latFallback] = extrairPrimeiroPonto(
+                info.object.geometry?.coordinates
+              );
               const lng = info.coordinate ? info.coordinate[0] : lngFallback;
               const lat = info.coordinate ? info.coordinate[1] : latFallback;
               aoSelecionar({ feature: info.object, lat, lng });
@@ -298,7 +537,9 @@ function CamadasDeckGL({
           getLineColor: [255, 255, 255, 210],
           onClick: (info: any) => {
             if (info.object) {
-              const [lngFallback, latFallback] = extrairPrimeiroPonto(info.object.geometry?.coordinates);
+              const [lngFallback, latFallback] = extrairPrimeiroPonto(
+                info.object.geometry?.coordinates
+              );
               const lng = info.coordinate ? info.coordinate[0] : lngFallback;
               const lat = info.coordinate ? info.coordinate[1] : latFallback;
               aoSelecionar({ feature: info.object, lat, lng });
@@ -325,6 +566,8 @@ export default function App() {
   const [exibirEmpresas, setExibirEmpresas] = useState(true);
   const [exibirRodovias, setExibirRodovias] = useState(true);
   const [selecionado, setSelecionado] = useState<SelecaoMapa | null>(null);
+  const [localPesquisado, setLocalPesquisado] = useState<LocalPesquisado | null>(null);
+  const [exibirInfoEndereco, setExibirInfoEndereco] = useState(false);
 
   const [categoriasAtivas, setCategoriasAtivas] = useState<string[]>([]);
   const [subbaciaSelecionada, setSubbaciaSelecionada] = useState<string>('todas');
@@ -534,7 +777,7 @@ export default function App() {
   };
 
   return (
-    <APIProvider apiKey={GOOGLE_MAPS_API_KEY}>
+    <APIProvider apiKey={GOOGLE_MAPS_API_KEY} language="pt-BR" region="BR">
       <div className="flex flex-col h-screen w-screen bg-slate-50 text-slate-800 font-sans overflow-hidden">
         <header className="min-h-16 py-2 bg-slate-900 text-white px-6 flex flex-wrap items-center justify-between gap-4 shadow-md z-20 shrink-0">
           <div className="flex items-center gap-3">
@@ -799,8 +1042,44 @@ export default function App() {
               defaultZoom={9}
               gestureHandling="greedy"
               mapTypeControl={true}
-              streetViewControl={false}
+              streetViewControl={true}
+              fullscreenControl={true}
             >
+              <BuscaEnderecoGoogle
+                possuiMarcador={Boolean(localPesquisado)}
+                aoEncontrarLocal={(loc) => {
+                  setLocalPesquisado(loc);
+                  setExibirInfoEndereco(true);
+                }}
+                aoLimparLocal={() => {
+                  setLocalPesquisado(null);
+                  setExibirInfoEndereco(false);
+                }}
+              />
+
+              {localPesquisado && (
+                <Marker
+                  position={{ lat: localPesquisado.lat, lng: localPesquisado.lng }}
+                  onClick={() => setExibirInfoEndereco(true)}
+                />
+              )}
+
+              {localPesquisado && exibirInfoEndereco && (
+                <InfoWindow
+                  position={{ lat: localPesquisado.lat, lng: localPesquisado.lng }}
+                  onCloseClick={() => setExibirInfoEndereco(false)}
+                >
+                  <div className="p-1 max-w-xs text-xs text-slate-800">
+                    <div className="font-bold text-slate-900 mb-0.5">Endereço Pesquisado</div>
+                    <p className="text-slate-600">{localPesquisado.endereco}</p>
+                    <p className="text-[10px] text-slate-400 mt-1">
+                      {localPesquisado.lat.toFixed(5)}, {localPesquisado.lng.toFixed(5)}
+                    </p>
+                    <BotaoAbrirStreetView lat={localPesquisado.lat} lng={localPesquisado.lng} />
+                  </div>
+                </InfoWindow>
+              )}
+
               {!carregando && (
                 <CamadasDeckGL
                   dadosEmpresas={empresasFiltradas}
@@ -811,6 +1090,7 @@ export default function App() {
                   aoSelecionar={setSelecionado}
                 />
               )}
+
               {selecionado && (
                 <InfoWindow
                   position={{ lat: selecionado.lat, lng: selecionado.lng }}
@@ -820,7 +1100,9 @@ export default function App() {
                     <div className="flex items-center justify-between gap-2 border-b border-slate-200 pb-1">
                       <span className="font-bold text-sm text-slate-900">
                         {selecionado.feature.properties?._camadaOrigem === 'Malha Rodoviária'
-                          ? String(selecionado.feature.properties?.codigo_rodovia || 'Trecho Rodoviário')
+                          ? String(
+                              selecionado.feature.properties?.codigo_rodovia || 'Trecho Rodoviário'
+                            )
                           : obterCategoriaItem(selecionado.feature.properties || {})}
                       </span>
                       <span
@@ -935,6 +1217,8 @@ export default function App() {
                         {obterSubbaciaItem(selecionado.feature.properties || {}) || '—'}
                       </span>
                     </div>
+
+                    <BotaoAbrirStreetView lat={selecionado.lat} lng={selecionado.lng} />
                   </div>
                 </InfoWindow>
               )}
