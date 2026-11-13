@@ -28,6 +28,7 @@ import {
 const GCS_EMPRESAS_URL = import.meta.env.VITE_GCS_GEOJSON_URL as string;
 const GCS_RODOVIAS_URL = (import.meta.env.VITE_GCS_RODOVIAS_URL ||
   import.meta.env.VITE_GCS_DNIT_URL) as string;
+const GCS_RIOS_URL = import.meta.env.VITE_GCS_ANA_RIOS_URL as string;
 const GOOGLE_MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string;
 
 const TETO_ALTURA_HAND = 30;
@@ -47,6 +48,8 @@ const PALETA_CORES_EMPRESAS: [number, number, number][] = [
   [99, 102, 241],
   [132, 204, 22],
 ];
+
+type AlvoBusca = 'enderecos' | 'estradas' | 'rios';
 
 interface GeoFeature {
   type: 'Feature';
@@ -71,7 +74,7 @@ interface GeoFeature {
     extensao_subtrecho_m?: number;
     id_quadradinho?: string;
     subbacia_n6?: string | number;
-    cobacia?: string;
+    cobacia?: string | number;
     cotrecho?: number;
     noriocomp?: string;
     dist_ate_rio_m?: number;
@@ -88,7 +91,18 @@ interface GeoFeature {
     altura_max_acima_do_rio_m?: number;
     cota_pista_estimada_m?: number;
 
-    _camadaOrigem?: 'Estabelecimentos' | 'Malha Rodoviária';
+    // Propriedades da Hidrografia (ANA)
+    cocursodag?: number | string;
+    nome_rio?: string;
+    descricao_subbacia_n6?: string;
+    comprimento_trecho_km?: number;
+    distancia_ate_foz_km?: number;
+    area_drenagem_local_km2?: number;
+    area_drenagem_acumulada_montante_km2?: number;
+    ordem_strahler?: number;
+    ordem_curso_dagua?: number;
+
+    _camadaOrigem?: 'Estabelecimentos' | 'Malha Rodoviária' | 'Hidrografia (ANA)';
     [key: string]: any;
   };
 }
@@ -105,12 +119,38 @@ interface LocalPesquisado {
   endereco: string;
 }
 
+function normalizarTexto(texto: any): string {
+  if (texto === undefined || texto === null) return '';
+  return String(texto)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
 function extrairPrimeiroPonto(coords: any): [number, number] {
   if (!Array.isArray(coords)) return [-49.066, -26.9187];
   if (typeof coords[0] === 'number' && typeof coords[1] === 'number') {
     return [coords[0], coords[1]];
   }
   return extrairPrimeiroPonto(coords[0]);
+}
+
+function extrairTodosPontos(coords: any, acumulador: [number, number][] = []): [number, number][] {
+  if (!Array.isArray(coords)) return acumulador;
+  if (typeof coords[0] === 'number' && typeof coords[1] === 'number') {
+    acumulador.push([coords[0], coords[1]]);
+  } else {
+    for (const item of coords) {
+      extrairTodosPontos(item, acumulador);
+    }
+  }
+  return acumulador;
+}
+
+function obterPontoCentralFeature(feature: GeoFeature): [number, number] {
+  const pontos = extrairTodosPontos(feature.geometry?.coordinates);
+  if (pontos.length === 0) return [-49.066, -26.9187];
+  return pontos[Math.floor(pontos.length / 2)];
 }
 
 function obterCategoriaItem(p: Record<string, any>): string {
@@ -131,7 +171,7 @@ function obterCategoriaItem(p: Record<string, any>): string {
 }
 
 function obterSubbaciaItem(p: Record<string, any>): string {
-  const valor = p.nome_subbacia_n6 ?? p.subbacia_n6;
+  const valor = p.nome_subbacia_n6 ?? p.subbacia_n6 ?? p.descricao_subbacia_n6;
   if (valor === undefined || valor === null) return '';
   return String(valor).trim();
 }
@@ -180,13 +220,23 @@ function BotaoAbrirStreetView({ lat, lng }: { lat: number; lng: number }) {
   );
 }
 
-function BuscaEnderecoGoogle({
+function BuscaUnificadaMapa({
+  alvoBusca,
+  aoMudarAlvoBusca,
+  dadosRodovias,
+  dadosRios,
   aoEncontrarLocal,
   aoLimparLocal,
+  aoSelecionarFeatureVetorial,
   possuiMarcador,
 }: {
+  alvoBusca: AlvoBusca;
+  aoMudarAlvoBusca: (novoAlvo: AlvoBusca) => void;
+  dadosRodovias: GeoFeature[];
+  dadosRios: GeoFeature[];
   aoEncontrarLocal: (local: LocalPesquisado) => void;
   aoLimparLocal: () => void;
+  aoSelecionarFeatureVetorial: (sel: SelecaoMapa, tipo: 'estradas' | 'rios') => void;
   possuiMarcador: boolean;
 }) {
   const map = useMap();
@@ -194,7 +244,7 @@ function BuscaEnderecoGoogle({
   const geocodingLib = useMapsLibrary('geocoding');
 
   const [texto, setTexto] = useState('');
-  const [sugestoes, setSugestoes] = useState<any[]>([]);
+  const [sugestoesPlaces, setSugestoesPlaces] = useState<any[]>([]);
   const [aberto, setAberto] = useState(false);
   const tokenRef = useRef<any>(null);
   const reqIdRef = useRef(0);
@@ -209,11 +259,56 @@ function BuscaEnderecoGoogle({
     return tokenRef.current;
   };
 
-  const buscarSugestoes = async (valor: string) => {
+  const sugestoesVetoriais = useMemo(() => {
+    if (alvoBusca === 'enderecos') return [];
+    const termo = normalizarTexto(texto.trim());
+    if (termo.length < 2) return [];
+
+    if (alvoBusca === 'estradas') {
+      return dadosRodovias
+        .filter((f) => {
+          const p = f.properties || {};
+          return (
+            normalizarTexto(p.codigo_rodovia).includes(termo) ||
+            normalizarTexto(p.tipo_jurisdicao).includes(termo) ||
+            normalizarTexto(p.administracao).includes(termo) ||
+            normalizarTexto(p.noriocomp).includes(termo) ||
+            normalizarTexto(p.id_trecho_origem).includes(termo) ||
+            normalizarTexto(obterSubbaciaItem(p)).includes(termo)
+          );
+        })
+        .slice(0, 20);
+    }
+
+    if (alvoBusca === 'rios') {
+      return dadosRios
+        .filter((f) => {
+          const p = f.properties || {};
+          return (
+            normalizarTexto(p.nome_rio).includes(termo) ||
+            normalizarTexto(p.descricao_subbacia_n6).includes(termo) ||
+            String(p.cotrecho ?? '').includes(termo) ||
+            String(p.cobacia ?? '').includes(termo)
+          );
+        })
+        .slice(0, 20);
+    }
+
+    return [];
+  }, [alvoBusca, texto, dadosRodovias, dadosRios]);
+
+  const aoDigitar = async (valor: string) => {
     setTexto(valor);
     const consulta = valor.trim();
+
+    if (alvoBusca !== 'enderecos') {
+      setSugestoesPlaces([]);
+      setAberto(consulta.length >= 2);
+      return;
+    }
+
     if (consulta.length < 3 || !placesLib) {
-      setSugestoes([]);
+      setSugestoesPlaces([]);
       setAberto(false);
       return;
     }
@@ -238,14 +333,14 @@ function BuscaEnderecoGoogle({
         });
 
       if (reqAtual !== reqIdRef.current) return;
-      setSugestoes(suggestions || []);
+      setSugestoesPlaces(suggestions || []);
       setAberto((suggestions || []).length > 0);
     } catch (err) {
       console.error('Erro ao buscar sugestões Places API (New):', err);
     }
   };
 
-  const selecionarSugestao = async (sugestao: any) => {
+  const selecionarSugestaoPlace = async (sugestao: any) => {
     try {
       const predicao = sugestao.placePrediction;
       if (!predicao) return;
@@ -256,7 +351,7 @@ function BuscaEnderecoGoogle({
       });
 
       tokenRef.current = null;
-      setSugestoes([]);
+      setSugestoesPlaces([]);
       setAberto(false);
 
       if (!place.location || !map) return;
@@ -278,8 +373,41 @@ function BuscaEnderecoGoogle({
     }
   };
 
-  const buscarPorEnter = (e: React.FormEvent) => {
+  const selecionarItemVetorial = (feature: GeoFeature) => {
+    if (!map) return;
+    setAberto(false);
+
+    const pontos = extrairTodosPontos(feature.geometry?.coordinates);
+    if (pontos.length > 0) {
+      const bounds = new google.maps.LatLngBounds();
+      pontos.forEach(([lng, lat]) => bounds.extend({ lat, lng }));
+      map.fitBounds(bounds, 70);
+    }
+
+    const [lngCentral, latCentral] = obterPontoCentralFeature(feature);
+    const p = feature.properties || {};
+
+    if (alvoBusca === 'rios') {
+      setTexto(`${p.nome_rio || 'Rio'} (Trecho ${p.cotrecho || ''})`);
+      aoSelecionarFeatureVetorial({ feature, lat: latCentral, lng: lngCentral }, 'rios');
+    } else if (alvoBusca === 'estradas') {
+      const kmTxt =
+        p.km_inicial !== undefined ? ` - km ${Number(p.km_inicial).toFixed(1)}` : '';
+      setTexto(`${p.codigo_rodovia || 'Rodovia'}${kmTxt}`);
+      aoSelecionarFeatureVetorial({ feature, lat: latCentral, lng: lngCentral }, 'estradas');
+    }
+  };
+
+  const submeterFormulario = (e: React.FormEvent) => {
     e.preventDefault();
+
+    if (alvoBusca !== 'enderecos') {
+      if (sugestoesVetoriais.length > 0) {
+        selecionarItemVetorial(sugestoesVetoriais[0]);
+      }
+      return;
+    }
+
     setAberto(false);
     const consulta = texto.trim();
     if (!consulta || !geocodingLib || !map) return;
@@ -302,45 +430,115 @@ function BuscaEnderecoGoogle({
     });
   };
 
-  return (
-    <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 w-80 sm:w-96 max-w-[calc(100%-9rem)]">
-      <form onSubmit={buscarPorEnter}>
-        <div className="relative flex items-center bg-white rounded-lg shadow-md border border-slate-200 focus-within:ring-2 focus-within:ring-blue-500/40 focus-within:border-blue-500">
-          <Navigation className="w-4 h-4 text-blue-600 ml-3 shrink-0" />
-          <input
-            type="text"
-            value={texto}
-            onChange={(e) => buscarSugestoes(e.target.value)}
-            onFocus={() => sugestoes.length > 0 && setAberto(true)}
-            placeholder="Pesquisar endereço ou município no Google Maps..."
-            className="w-full px-2.5 py-2 text-xs sm:text-sm text-slate-800 bg-transparent focus:outline-none"
-          />
-          {(texto || possuiMarcador) && (
-            <button
-              type="button"
-              onClick={() => {
-                setTexto('');
-                setSugestoes([]);
-                setAberto(false);
-                aoLimparLocal();
-              }}
-              className="p-1.5 mr-1 text-slate-400 hover:text-slate-600 cursor-pointer"
-              title="Limpar endereço"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          )}
-        </div>
-      </form>
+  const trocarModo = (novoModo: AlvoBusca) => {
+    aoMudarAlvoBusca(novoModo);
+    setTexto('');
+    setSugestoesPlaces([]);
+    setAberto(false);
+  };
 
-      {aberto && sugestoes.length > 0 && (
+  const placeholderAtual =
+    alvoBusca === 'enderecos'
+      ? 'Pesquisar endereço ou município no Google Maps...'
+      : alvoBusca === 'estradas'
+      ? 'Pesquisar rodovia (ex: BR-470, SC-110, Federal)...'
+      : 'Pesquisar rio, sub-bacia ou código do trecho...';
+
+  return (
+    <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 w-80 sm:w-[27rem] max-w-[calc(100%-9rem)]">
+      <div className="bg-white/95 backdrop-blur-sm rounded-xl shadow-md border border-slate-200 p-1.5">
+        <form onSubmit={submeterFormulario}>
+          <div className="relative flex items-center bg-slate-50 rounded-lg border border-slate-200 focus-within:bg-white focus-within:ring-2 focus-within:ring-blue-500/40 focus-within:border-blue-500 transition-all">
+            {alvoBusca === 'enderecos' && (
+              <Navigation className="w-4 h-4 text-blue-600 ml-3 shrink-0" />
+            )}
+            {alvoBusca === 'estradas' && (
+              <Route className="w-4 h-4 text-orange-600 ml-3 shrink-0" />
+            )}
+            {alvoBusca === 'rios' && <Waves className="w-4 h-4 text-sky-600 ml-3 shrink-0" />}
+
+            <input
+              type="text"
+              value={texto}
+              onChange={(e) => aoDigitar(e.target.value)}
+              onFocus={() => {
+                if (alvoBusca === 'enderecos' && sugestoesPlaces.length > 0) setAberto(true);
+                if (alvoBusca !== 'enderecos' && texto.trim().length >= 2) setAberto(true);
+              }}
+              placeholder={placeholderAtual}
+              className="w-full px-2.5 py-1.5 text-xs sm:text-sm text-slate-800 bg-transparent focus:outline-none"
+            />
+            {(texto || possuiMarcador) && (
+              <button
+                type="button"
+                onClick={() => {
+                  setTexto('');
+                  setSugestoesPlaces([]);
+                  setAberto(false);
+                  aoLimparLocal();
+                }}
+                className="p-1.5 mr-1 text-slate-400 hover:text-slate-600 cursor-pointer"
+                title="Limpar pesquisa"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
+          </div>
+        </form>
+
+        {/* Radio Buttons para seleção da base de pesquisa */}
+        <div className="flex items-center justify-center sm:justify-start gap-4 px-2 pt-1.5 pb-0.5 text-xs text-slate-700 select-none">
+          <span className="text-[11px] font-semibold text-slate-400 hidden sm:inline">
+            Buscar em:
+          </span>
+
+          <label className="flex items-center gap-1.5 cursor-pointer font-medium hover:text-blue-600 transition-colors">
+            <input
+              type="radio"
+              name="alvoBuscaMapa"
+              value="enderecos"
+              checked={alvoBusca === 'enderecos'}
+              onChange={() => trocarModo('enderecos')}
+              className="accent-blue-600 cursor-pointer"
+            />
+            <span>Endereços</span>
+          </label>
+
+          <label className="flex items-center gap-1.5 cursor-pointer font-medium hover:text-orange-600 transition-colors">
+            <input
+              type="radio"
+              name="alvoBuscaMapa"
+              value="estradas"
+              checked={alvoBusca === 'estradas'}
+              onChange={() => trocarModo('estradas')}
+              className="accent-orange-600 cursor-pointer"
+            />
+            <span>Estradas</span>
+          </label>
+
+          <label className="flex items-center gap-1.5 cursor-pointer font-medium hover:text-sky-600 transition-colors">
+            <input
+              type="radio"
+              name="alvoBuscaMapa"
+              value="rios"
+              checked={alvoBusca === 'rios'}
+              onChange={() => trocarModo('rios')}
+              className="accent-sky-600 cursor-pointer"
+            />
+            <span>Rios</span>
+          </label>
+        </div>
+      </div>
+
+      {/* Sugestões Google Places (Endereços) */}
+      {aberto && alvoBusca === 'enderecos' && sugestoesPlaces.length > 0 && (
         <ul className="mt-1 bg-white rounded-lg shadow-lg border border-slate-200 max-h-60 overflow-y-auto divide-y divide-slate-100 text-xs text-slate-700">
-          {sugestoes.map((s, idx) => {
+          {sugestoesPlaces.map((s, idx) => {
             const label = s.placePrediction?.text?.toString() || 'Endereço sugerido';
             return (
               <li
                 key={s.placePrediction?.placeId || idx}
-                onClick={() => selecionarSugestao(s)}
+                onClick={() => selecionarSugestaoPlace(s)}
                 className="px-3 py-2 hover:bg-blue-50 cursor-pointer flex items-center gap-2 transition-colors"
               >
                 <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0" />
@@ -351,6 +549,71 @@ function BuscaEnderecoGoogle({
           <li className="px-3 py-1 text-[10px] text-right text-slate-400 bg-slate-50 select-none">
             Google Maps
           </li>
+        </ul>
+      )}
+
+      {/* Sugestões Vetoriais (Estradas ou Rios) */}
+      {aberto && alvoBusca !== 'enderecos' && texto.trim().length >= 2 && (
+        <ul className="mt-1 bg-white rounded-lg shadow-lg border border-slate-200 max-h-64 overflow-y-auto divide-y divide-slate-100 text-xs text-slate-700">
+          {sugestoesVetoriais.length === 0 ? (
+            <li className="px-3 py-2.5 text-slate-400 text-center">
+              Nenhum trecho encontrado para &ldquo;{texto.trim()}&rdquo;.
+            </li>
+          ) : (
+            sugestoesVetoriais.map((feat, idx) => {
+              const p = feat.properties || {};
+              if (alvoBusca === 'rios') {
+                return (
+                  <li
+                    key={`rio-${p.cotrecho ?? idx}`}
+                    onClick={() => selecionarItemVetorial(feat)}
+                    className="px-3 py-2 hover:bg-sky-50 cursor-pointer transition-colors"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-semibold text-slate-800 truncate">
+                        {p.nome_rio || 'Curso de água'}
+                      </span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-100 text-sky-800 font-medium shrink-0">
+                        Trecho {p.cotrecho} • {p.comprimento_trecho_km ?? '—'} km
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-slate-500 truncate mt-0.5">
+                      {p.descricao_subbacia_n6 || 'Sub-bacia não informada'} (Strahler{' '}
+                      {p.ordem_strahler ?? '—'})
+                    </div>
+                  </li>
+                );
+              }
+
+              return (
+                <li
+                  key={`rod-${p.id_quadradinho ?? p.id_trecho_origem ?? idx}`}
+                  onClick={() => selecionarItemVetorial(feat)}
+                  className="px-3 py-2 hover:bg-orange-50 cursor-pointer transition-colors"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-semibold text-slate-800 truncate">
+                      {p.codigo_rodovia || 'Rodovia'}{' '}
+                      {p.km_inicial !== undefined && p.km_final !== undefined
+                        ? `(km ${Number(p.km_inicial).toFixed(1)} ao ${Number(p.km_final).toFixed(
+                            1
+                          )})`
+                        : ''}
+                    </span>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-orange-100 text-orange-800 font-medium shrink-0">
+                      {p.tipo_jurisdicao || 'Trecho'}
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-slate-500 truncate mt-0.5">
+                    Ref: {p.noriocomp || '—'} • HAND mín:{' '}
+                    {p.altura_min_acima_do_rio_m !== undefined
+                      ? `${Number(p.altura_min_acima_do_rio_m).toFixed(1)} m`
+                      : '—'}
+                  </div>
+                </li>
+              );
+            })
+          )}
         </ul>
       )}
     </div>
@@ -447,15 +710,21 @@ function BarraIntervaloDuplo({
 function CamadasDeckGL({
   dadosEmpresas,
   dadosRodovias,
+  dadosRios,
   exibirEmpresas,
   exibirRodovias,
+  exibirRios,
+  cotrechoSelecionado,
   mapaCores,
   aoSelecionar,
 }: {
   dadosEmpresas: GeoFeature[];
   dadosRodovias: GeoFeature[];
+  dadosRios: GeoFeature[];
   exibirEmpresas: boolean;
   exibirRodovias: boolean;
+  exibirRios: boolean;
+  cotrechoSelecionado: number | null;
   mapaCores: Record<string, [number, number, number]>;
   aoSelecionar: (sel: SelecaoMapa | null) => void;
 }) {
@@ -474,6 +743,49 @@ function CamadasDeckGL({
     if (!overlayRef.current) return;
 
     const camadas: any[] = [];
+
+    if (exibirRios && dadosRios.length > 0) {
+      camadas.push(
+        new GeoJsonLayer({
+          id: 'camada-hidrografia-rios',
+          data: { type: 'FeatureCollection', features: dadosRios } as any,
+          pickable: true,
+          stroked: true,
+          filled: false,
+          lineWidthMinPixels: 1.5,
+          lineWidthMaxPixels: 9,
+          getLineWidth: (f: any) => {
+            const p = f.properties || {};
+            const isSel =
+              cotrechoSelecionado !== null && Number(p.cotrecho) === cotrechoSelecionado;
+            const strahler = Number(p.ordem_strahler || 1);
+            return isSel ? Math.max(strahler * 12, 32) : Math.max(strahler * 5, 8);
+          },
+          getLineColor: (f: any) => {
+            const p = f.properties || {};
+            const isSel =
+              cotrechoSelecionado !== null && Number(p.cotrecho) === cotrechoSelecionado;
+            if (isSel) return [245, 158, 11, 255]; // Realce âmbar quando selecionado
+            const strahler = Number(p.ordem_strahler || 1);
+            return strahler >= 4 ? [2, 132, 199, 235] : [14, 165, 233, 195];
+          },
+          onClick: (info: any) => {
+            if (info.object) {
+              const [lngFallback, latFallback] = extrairPrimeiroPonto(
+                info.object.geometry?.coordinates
+              );
+              const lng = info.coordinate ? info.coordinate[0] : lngFallback;
+              const lat = info.coordinate ? info.coordinate[1] : latFallback;
+              aoSelecionar({ feature: info.object, lat, lng });
+            }
+          },
+          updateTriggers: {
+            getLineColor: [cotrechoSelecionado],
+            getLineWidth: [cotrechoSelecionado],
+          },
+        })
+      );
+    }
 
     if (exibirRodovias && dadosRodovias.length > 0) {
       camadas.push(
@@ -553,7 +865,17 @@ function CamadasDeckGL({
     }
 
     overlayRef.current.setProps({ layers: camadas });
-  }, [dadosEmpresas, dadosRodovias, exibirEmpresas, exibirRodovias, mapaCores, aoSelecionar]);
+  }, [
+    dadosEmpresas,
+    dadosRodovias,
+    dadosRios,
+    exibirEmpresas,
+    exibirRodovias,
+    exibirRios,
+    cotrechoSelecionado,
+    mapaCores,
+    aoSelecionar,
+  ]);
 
   return null;
 }
@@ -561,10 +883,14 @@ function CamadasDeckGL({
 export default function App() {
   const [brutoEmpresas, setBrutoEmpresas] = useState<GeoFeature[]>([]);
   const [brutoRodovias, setBrutoRodovias] = useState<GeoFeature[]>([]);
+  const [brutoRios, setBrutoRios] = useState<GeoFeature[]>([]);
   const [carregando, setCarregando] = useState(true);
 
   const [exibirEmpresas, setExibirEmpresas] = useState(true);
   const [exibirRodovias, setExibirRodovias] = useState(true);
+  const [exibirRios, setExibirRios] = useState(true);
+
+  const [alvoBusca, setAlvoBusca] = useState<AlvoBusca>('enderecos');
   const [selecionado, setSelecionado] = useState<SelecaoMapa | null>(null);
   const [localPesquisado, setLocalPesquisado] = useState<LocalPesquisado | null>(null);
   const [exibirInfoEndereco, setExibirInfoEndereco] = useState(false);
@@ -584,7 +910,7 @@ export default function App() {
   useEffect(() => {
     const buscarCamada = async (
       url: string | undefined,
-      nomeCamada: 'Estabelecimentos' | 'Malha Rodoviária'
+      nomeCamada: 'Estabelecimentos' | 'Malha Rodoviária' | 'Hidrografia (ANA)'
     ): Promise<GeoFeature[]> => {
       if (!url || !url.startsWith('http')) return [];
       try {
@@ -605,9 +931,11 @@ export default function App() {
     Promise.all([
       buscarCamada(GCS_EMPRESAS_URL, 'Estabelecimentos'),
       buscarCamada(GCS_RODOVIAS_URL, 'Malha Rodoviária'),
-    ]).then(([emp, rod]) => {
+      buscarCamada(GCS_RIOS_URL, 'Hidrografia (ANA)'),
+    ]).then(([emp, rod, rios]) => {
       setBrutoEmpresas(emp);
       setBrutoRodovias(rod);
+      setBrutoRios(rios);
 
       const todas = [...emp, ...rod];
       const cats = new Set<string>();
@@ -643,6 +971,14 @@ export default function App() {
       if (bacia !== '') bacias.add(bacia);
     });
 
+    if (exibirRios) {
+      brutoRios.forEach((f) => {
+        const p = f.properties || {};
+        const bacia = obterSubbaciaItem(p);
+        if (bacia !== '') bacias.add(bacia);
+      });
+    }
+
     const categoriasOrdenadas = Array.from(cats).sort((a, b) => {
       const strA = String(a);
       const strB = String(b);
@@ -673,7 +1009,7 @@ export default function App() {
         String(a).localeCompare(String(b), 'pt-BR', { numeric: true })
       ),
     };
-  }, [brutoEmpresas, brutoRodovias, exibirEmpresas, exibirRodovias]);
+  }, [brutoEmpresas, brutoRodovias, brutoRios, exibirEmpresas, exibirRodovias, exibirRios]);
 
   const filtrarLista = (lista: GeoFeature[], aplicarBuscaEstabelecimento: boolean) => {
     const termo = buscaPalavraChave.trim().toLowerCase();
@@ -737,9 +1073,31 @@ export default function App() {
     ]
   );
 
-  const totalFiltrados = empresasFiltradas.length + rodoviasFiltradas.length;
+  const riosFiltrados = useMemo(() => {
+    if (!exibirRios) return [];
+    if (subbaciaSelecionada === 'todas') return brutoRios;
+    return brutoRios.filter((f) => {
+      const p = f.properties || {};
+      return (
+        String(p.subbacia_n6 ?? '').trim() === subbaciaSelecionada ||
+        String(p.descricao_subbacia_n6 ?? '').trim() === subbaciaSelecionada ||
+        obterSubbaciaItem(p) === subbaciaSelecionada
+      );
+    });
+  }, [brutoRios, exibirRios, subbaciaSelecionada]);
+
+  const totalFiltrados =
+    empresasFiltradas.length + rodoviasFiltradas.length + riosFiltrados.length;
   const totalAtivosBrutos =
-    (exibirEmpresas ? brutoEmpresas.length : 0) + (exibirRodovias ? brutoRodovias.length : 0);
+    (exibirEmpresas ? brutoEmpresas.length : 0) +
+    (exibirRodovias ? brutoRodovias.length : 0) +
+    (exibirRios ? brutoRios.length : 0);
+
+  const cotrechoRioSelecionado =
+    selecionado?.feature.properties?._camadaOrigem === 'Hidrografia (ANA)' &&
+    selecionado.feature.properties?.cotrecho !== undefined
+      ? Number(selecionado.feature.properties.cotrecho)
+      : null;
 
   const alternarCategoria = (cat: string) => {
     setCategoriasAtivas((prev) =>
@@ -794,7 +1152,7 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex items-center gap-2 bg-slate-800/90 p-1.5 rounded-xl border border-slate-700">
+          <div className="flex flex-wrap items-center gap-2 bg-slate-800/90 p-1.5 rounded-xl border border-slate-700">
             <span className="text-[11px] uppercase tracking-wider text-slate-400 font-semibold px-2 hidden lg:inline">
               Camadas:
             </span>
@@ -825,6 +1183,21 @@ export default function App() {
               <span>Malha Rodoviária</span>
               <span className="text-[10px] opacity-85">
                 ({rodoviasFiltradas.length.toLocaleString('pt-BR')})
+              </span>
+            </button>
+
+            <button
+              onClick={() => setExibirRios((v) => !v)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                exibirRios
+                  ? 'bg-sky-600 text-white shadow-sm'
+                  : 'bg-transparent text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Waves className="w-3.5 h-3.5" />
+              <span>Rios (ANA)</span>
+              <span className="text-[10px] opacity-85">
+                ({riosFiltrados.length.toLocaleString('pt-BR')})
               </span>
             </button>
           </div>
@@ -889,19 +1262,32 @@ export default function App() {
                   </div>
                 </div>
 
-                {exibirRodovias && (
-                  <div className="px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between text-xs">
-                    <span className="font-semibold text-slate-600">Jurisdição Viária:</span>
-                    <div className="flex items-center gap-3">
-                      <span className="flex items-center gap-1.5 font-medium text-slate-700">
-                        <span className="w-4 h-1.5 rounded-full bg-orange-600 inline-block" />
-                        Federal
-                      </span>
-                      <span className="flex items-center gap-1.5 font-medium text-slate-700">
-                        <span className="w-4 h-1.5 rounded-full bg-violet-600 inline-block" />
-                        Estadual
-                      </span>
-                    </div>
+                {(exibirRodovias || exibirRios) && (
+                  <div className="px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1.5 text-xs">
+                    {exibirRodovias && (
+                      <div className="flex items-center justify-between">
+                        <span className="font-semibold text-slate-600">Jurisdição Viária:</span>
+                        <div className="flex items-center gap-3">
+                          <span className="flex items-center gap-1.5 font-medium text-slate-700">
+                            <span className="w-4 h-1.5 rounded-full bg-orange-600 inline-block" />
+                            Federal
+                          </span>
+                          <span className="flex items-center gap-1.5 font-medium text-slate-700">
+                            <span className="w-4 h-1.5 rounded-full bg-violet-600 inline-block" />
+                            Estadual
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                    {exibirRios && (
+                      <div className="flex items-center justify-between">
+                        <span className="font-semibold text-slate-600">Hidrografia ANA:</span>
+                        <span className="flex items-center gap-1.5 font-medium text-slate-700">
+                          <span className="w-4 h-1.5 rounded-full bg-sky-600 inline-block" />
+                          Cursos de Água (BHO)
+                        </span>
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -1045,15 +1431,31 @@ export default function App() {
               streetViewControl={true}
               fullscreenControl={true}
             >
-              <BuscaEnderecoGoogle
+              <BuscaUnificadaMapa
+                alvoBusca={alvoBusca}
+                aoMudarAlvoBusca={(novoAlvo) => {
+                  setAlvoBusca(novoAlvo);
+                  if (novoAlvo === 'rios') setExibirRios(true);
+                  if (novoAlvo === 'estradas') setExibirRodovias(true);
+                }}
+                dadosRodovias={brutoRodovias}
+                dadosRios={brutoRios}
                 possuiMarcador={Boolean(localPesquisado)}
                 aoEncontrarLocal={(loc) => {
+                  setSelecionado(null);
                   setLocalPesquisado(loc);
                   setExibirInfoEndereco(true);
                 }}
                 aoLimparLocal={() => {
                   setLocalPesquisado(null);
                   setExibirInfoEndereco(false);
+                }}
+                aoSelecionarFeatureVetorial={(sel, tipo) => {
+                  setLocalPesquisado(null);
+                  setExibirInfoEndereco(false);
+                  if (tipo === 'rios') setExibirRios(true);
+                  if (tipo === 'estradas') setExibirRodovias(true);
+                  setSelecionado(sel);
                 }}
               />
 
@@ -1084,8 +1486,11 @@ export default function App() {
                 <CamadasDeckGL
                   dadosEmpresas={empresasFiltradas}
                   dadosRodovias={rodoviasFiltradas}
+                  dadosRios={riosFiltrados}
                   exibirEmpresas={exibirEmpresas}
                   exibirRodovias={exibirRodovias}
+                  exibirRios={exibirRios}
+                  cotrechoSelecionado={cotrechoRioSelecionado}
                   mapaCores={mapaCores}
                   aoSelecionar={setSelecionado}
                 />
@@ -1099,7 +1504,9 @@ export default function App() {
                   <div className="p-1 max-w-xs max-h-80 overflow-y-auto text-slate-800 text-xs space-y-1.5">
                     <div className="flex items-center justify-between gap-2 border-b border-slate-200 pb-1">
                       <span className="font-bold text-sm text-slate-900">
-                        {selecionado.feature.properties?._camadaOrigem === 'Malha Rodoviária'
+                        {selecionado.feature.properties?._camadaOrigem === 'Hidrografia (ANA)'
+                          ? String(selecionado.feature.properties?.nome_rio || 'Curso de Água')
+                          : selecionado.feature.properties?._camadaOrigem === 'Malha Rodoviária'
                           ? String(
                               selecionado.feature.properties?.codigo_rodovia || 'Trecho Rodoviário'
                             )
@@ -1107,7 +1514,9 @@ export default function App() {
                       </span>
                       <span
                         className={`text-[10px] px-1.5 py-0.5 rounded font-semibold shrink-0 ${
-                          selecionado.feature.properties?._camadaOrigem === 'Malha Rodoviária'
+                          selecionado.feature.properties?._camadaOrigem === 'Hidrografia (ANA)'
+                            ? 'bg-sky-100 text-sky-800'
+                            : selecionado.feature.properties?._camadaOrigem === 'Malha Rodoviária'
                             ? obterCategoriaItem(selecionado.feature.properties) ===
                               'Rodovia Federal'
                               ? 'bg-orange-100 text-orange-800'
@@ -1115,108 +1524,187 @@ export default function App() {
                             : 'bg-blue-50 text-blue-700'
                         }`}
                       >
-                        {selecionado.feature.properties?._camadaOrigem === 'Malha Rodoviária'
+                        {selecionado.feature.properties?._camadaOrigem === 'Hidrografia (ANA)'
+                          ? 'Hidrografia ANA'
+                          : selecionado.feature.properties?._camadaOrigem === 'Malha Rodoviária'
                           ? String(selecionado.feature.properties?.tipo_jurisdicao || 'Rodovia')
                           : 'Estabelecimento'}
                       </span>
                     </div>
 
-                    {selecionado.feature.properties?.descricao_estabelecimento && (
-                      <p className="text-slate-600 font-medium">
-                        {String(selecionado.feature.properties.descricao_estabelecimento)}
-                      </p>
-                    )}
-
-                    {selecionado.feature.properties?._camadaOrigem === 'Malha Rodoviária' && (
-                      <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 py-1.5 border-b border-slate-100 text-[11px]">
-                        <span className="text-slate-500">Administração:</span>
+                    {selecionado.feature.properties?._camadaOrigem === 'Hidrografia (ANA)' ? (
+                      <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 pt-0.5 text-[11px]">
+                        <span className="text-slate-500">Cód. Trecho (BHO):</span>
                         <span className="font-semibold">
-                          {selecionado.feature.properties?.administracao || '—'}
+                          {selecionado.feature.properties?.cotrecho ?? '—'}
                         </span>
 
-                        <span className="text-slate-500">Superfície:</span>
+                        <span className="text-slate-500">Ottobacia:</span>
                         <span className="font-semibold">
-                          {selecionado.feature.properties?.tipo_superficie || '—'}
+                          {selecionado.feature.properties?.cobacia ?? '—'}
                         </span>
 
-                        <span className="text-slate-500">Condição:</span>
+                        <span className="text-slate-500">Sub-bacia N6:</span>
                         <span className="font-semibold">
-                          {selecionado.feature.properties?.condicao_trecho || '—'}
+                          {selecionado.feature.properties?.descricao_subbacia_n6 ||
+                            obterSubbaciaItem(selecionado.feature.properties || {}) ||
+                            '—'}
                         </span>
 
-                        <span className="text-slate-500">Quilometragem:</span>
+                        <span className="text-slate-500">Extensão trecho:</span>
                         <span className="font-semibold">
-                          km {formatarNum(selecionado.feature.properties?.km_inicial, 2)} ao km{' '}
-                          {formatarNum(selecionado.feature.properties?.km_final, 2)}
+                          {formatarNum(
+                            selecionado.feature.properties?.comprimento_trecho_km,
+                            2,
+                            ' km'
+                          )}
                         </span>
 
-                        <span className="text-slate-500">Extensão subtrecho:</span>
+                        <span className="text-slate-500">Distância até foz:</span>
                         <span className="font-semibold">
-                          {formatarNum(selecionado.feature.properties?.extensao_subtrecho_m, 1, ' m')}
+                          {formatarNum(
+                            selecionado.feature.properties?.distancia_ate_foz_km,
+                            2,
+                            ' km'
+                          )}
                         </span>
 
-                        <span className="text-slate-500">Rio de referência:</span>
+                        <span className="text-slate-500">Área dren. local:</span>
                         <span className="font-semibold">
-                          {selecionado.feature.properties?.noriocomp || '—'} (
-                          {formatarNum(selecionado.feature.properties?.dist_ate_rio_m, 0, ' m')})
+                          {formatarNum(
+                            selecionado.feature.properties?.area_drenagem_local_km2,
+                            2,
+                            ' km²'
+                          )}
                         </span>
 
-                        <span className="text-slate-500">Cota estimada pista:</span>
+                        <span className="text-slate-500">Área acum. montante:</span>
                         <span className="font-semibold">
-                          {formatarNum(selecionado.feature.properties?.cota_pista_estimada_m, 2, ' m')}
+                          {formatarNum(
+                            selecionado.feature.properties?.area_drenagem_acumulada_montante_km2,
+                            2,
+                            ' km²'
+                          )}
                         </span>
 
-                        <span className="text-slate-500">Risco deslizamento:</span>
+                        <span className="text-slate-500">Ordem de Strahler:</span>
                         <span className="font-semibold">
-                          {selecionado.feature.properties?.classe_risco_deslizamento || '—'}
+                          {selecionado.feature.properties?.ordem_strahler ?? '—'}
                         </span>
                       </div>
-                    )}
-
-                    <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 pt-0.5 text-[11px]">
-                      <span className="text-slate-500">HAND mín. sobre rio:</span>
-                      <span className="font-semibold">
-                        {alturaExibidaPonto(
-                          selecionado.feature.properties?.altura_min_acima_do_rio_m
+                    ) : (
+                      <>
+                        {selecionado.feature.properties?.descricao_estabelecimento && (
+                          <p className="text-slate-600 font-medium">
+                            {String(selecionado.feature.properties.descricao_estabelecimento)}
+                          </p>
                         )}
-                      </span>
 
-                      {selecionado.feature.properties?._camadaOrigem === 'Malha Rodoviária' && (
-                        <>
-                          <span className="text-slate-500">HAND méd. / máx.:</span>
+                        {selecionado.feature.properties?._camadaOrigem === 'Malha Rodoviária' && (
+                          <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 py-1.5 border-b border-slate-100 text-[11px]">
+                            <span className="text-slate-500">Administração:</span>
+                            <span className="font-semibold">
+                              {selecionado.feature.properties?.administracao || '—'}
+                            </span>
+
+                            <span className="text-slate-500">Superfície:</span>
+                            <span className="font-semibold">
+                              {selecionado.feature.properties?.tipo_superficie || '—'}
+                            </span>
+
+                            <span className="text-slate-500">Condição:</span>
+                            <span className="font-semibold">
+                              {selecionado.feature.properties?.condicao_trecho || '—'}
+                            </span>
+
+                            <span className="text-slate-500">Quilometragem:</span>
+                            <span className="font-semibold">
+                              km {formatarNum(selecionado.feature.properties?.km_inicial, 2)} ao km{' '}
+                              {formatarNum(selecionado.feature.properties?.km_final, 2)}
+                            </span>
+
+                            <span className="text-slate-500">Extensão subtrecho:</span>
+                            <span className="font-semibold">
+                              {formatarNum(
+                                selecionado.feature.properties?.extensao_subtrecho_m,
+                                1,
+                                ' m'
+                              )}
+                            </span>
+
+                            <span className="text-slate-500">Rio de referência:</span>
+                            <span className="font-semibold">
+                              {selecionado.feature.properties?.noriocomp || '—'} (
+                              {formatarNum(selecionado.feature.properties?.dist_ate_rio_m, 0, ' m')}
+                              )
+                            </span>
+
+                            <span className="text-slate-500">Cota estimada pista:</span>
+                            <span className="font-semibold">
+                              {formatarNum(
+                                selecionado.feature.properties?.cota_pista_estimada_m,
+                                2,
+                                ' m'
+                              )}
+                            </span>
+
+                            <span className="text-slate-500">Risco deslizamento:</span>
+                            <span className="font-semibold">
+                              {selecionado.feature.properties?.classe_risco_deslizamento || '—'}
+                            </span>
+                          </div>
+                        )}
+
+                        <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 pt-0.5 text-[11px]">
+                          <span className="text-slate-500">HAND mín. sobre rio:</span>
                           <span className="font-semibold">
-                            {formatarNum(
-                              selecionado.feature.properties?.altura_media_acima_do_rio_m,
-                              2,
-                              ' m'
-                            )}{' '}
-                            /{' '}
-                            {formatarNum(
-                              selecionado.feature.properties?.altura_max_acima_do_rio_m,
-                              2,
-                              ' m'
+                            {alturaExibidaPonto(
+                              selecionado.feature.properties?.altura_min_acima_do_rio_m
                             )}
                           </span>
-                        </>
-                      )}
 
-                      <span className="text-slate-500">Inclinação:</span>
-                      <span className="font-semibold">
-                        {formatarNum(
-                          selecionado.feature.properties?.Inclinaxao_graus ??
-                            selecionado.feature.properties?.inclinacao_graus,
-                          1,
-                          '°'
-                        )}
-                        {selecionado.feature.properties?.inclinacao_pct !== undefined &&
-                          ` (${formatarNum(selecionado.feature.properties.inclinacao_pct, 1, '%')})`}
-                      </span>
+                          {selecionado.feature.properties?._camadaOrigem === 'Malha Rodoviária' && (
+                            <>
+                              <span className="text-slate-500">HAND méd. / máx.:</span>
+                              <span className="font-semibold">
+                                {formatarNum(
+                                  selecionado.feature.properties?.altura_media_acima_do_rio_m,
+                                  2,
+                                  ' m'
+                                )}{' '}
+                                /{' '}
+                                {formatarNum(
+                                  selecionado.feature.properties?.altura_max_acima_do_rio_m,
+                                  2,
+                                  ' m'
+                                )}
+                              </span>
+                            </>
+                          )}
 
-                      <span className="text-slate-500">Sub-bacia N6:</span>
-                      <span className="font-semibold">
-                        {obterSubbaciaItem(selecionado.feature.properties || {}) || '—'}
-                      </span>
-                    </div>
+                          <span className="text-slate-500">Inclinação:</span>
+                          <span className="font-semibold">
+                            {formatarNum(
+                              selecionado.feature.properties?.Inclinaxao_graus ??
+                                selecionado.feature.properties?.inclinacao_graus,
+                              1,
+                              '°'
+                            )}
+                            {selecionado.feature.properties?.inclinacao_pct !== undefined &&
+                              ` (${formatarNum(
+                                selecionado.feature.properties.inclinacao_pct,
+                                1,
+                                '%'
+                              )})`}
+                          </span>
+
+                          <span className="text-slate-500">Sub-bacia N6:</span>
+                          <span className="font-semibold">
+                            {obterSubbaciaItem(selecionado.feature.properties || {}) || '—'}
+                          </span>
+                        </div>
+                      </>
+                    )}
 
                     <BotaoAbrirStreetView lat={selecionado.lat} lng={selecionado.lng} />
                   </div>
@@ -1229,4 +1717,3 @@ export default function App() {
     </APIProvider>
   );
 }
-// FIM_DO_ARQUIVO
