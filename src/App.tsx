@@ -45,13 +45,11 @@ interface GeoFeature {
     coordinates: any;
   };
   properties: {
-    // Campos comuns / Estabelecimentos
-    categoria?: string;
+    categoria?: string | number;
     descricao_estabelecimento?: string;
-    nome_subbacia_n6?: string;
+    nome_subbacia_n6?: string | number;
     Inclinaxao_graus?: number;
 
-    // Campos de itajai_malha_rodoviaria_consolidada_split
     tipo_jurisdicao?: string;
     id_trecho_origem?: string;
     codigo_rodovia?: string;
@@ -62,7 +60,7 @@ interface GeoFeature {
     km_final?: number;
     extensao_subtrecho_m?: number;
     id_quadradinho?: string;
-    subbacia_n6?: string;
+    subbacia_n6?: string | number;
     cobacia?: string;
     cotrecho?: number;
     noriocomp?: string;
@@ -101,17 +99,25 @@ function extrairPrimeiroPonto(coords: any): [number, number] {
 
 function obterCategoriaItem(p: Record<string, any>): string {
   if (p._camadaOrigem === 'Malha Rodoviária') {
-    const jur = String(p.tipo_jurisdicao || '').trim().toLowerCase();
+    const jurBruta = p.tipo_jurisdicao !== undefined && p.tipo_jurisdicao !== null
+      ? String(p.tipo_jurisdicao).trim()
+      : '';
+    const jur = jurBruta.toLowerCase();
     if (jur.includes('fed')) return 'Rodovia Federal';
     if (jur.includes('est')) return 'Rodovia Estadual';
-    if (p.tipo_jurisdicao) return `Rodovia (${p.tipo_jurisdicao})`;
+    if (jurBruta !== '') return `Rodovia (${jurBruta})`;
     return 'Rodovia (Outras)';
   }
-  return p.categoria || 'Não classificado';
+  const catBruta = p.categoria !== undefined && p.categoria !== null
+    ? String(p.categoria).trim()
+    : '';
+  return catBruta !== '' ? catBruta : 'Não classificado';
 }
 
 function obterSubbaciaItem(p: Record<string, any>): string {
-  return p.nome_subbacia_n6 || p.subbacia_n6 || '';
+  const valor = p.nome_subbacia_n6 ?? p.subbacia_n6;
+  if (valor === undefined || valor === null) return '';
+  return String(valor).trim();
 }
 
 function BarraIntervaloDuplo({
@@ -391,15 +397,17 @@ export default function App() {
       const p = f.properties || {};
       cats.add(obterCategoriaItem(p));
       const bacia = obterSubbaciaItem(p);
-      if (bacia) bacias.add(bacia);
+      if (bacia !== '') bacias.add(bacia);
     });
 
     const categoriasOrdenadas = Array.from(cats).sort((a, b) => {
-      const aRod = a.startsWith('Rodovia');
-      const bRod = b.startsWith('Rodovia');
+      const strA = String(a);
+      const strB = String(b);
+      const aRod = strA.startsWith('Rodovia');
+      const bRod = strB.startsWith('Rodovia');
       if (aRod && !bRod) return -1;
       if (!aRod && bRod) return 1;
-      return a.localeCompare(b, 'pt-BR');
+      return strA.localeCompare(strB, 'pt-BR', { numeric: true });
     });
 
     const cores: Record<string, [number, number, number]> = {};
@@ -418,7 +426,9 @@ export default function App() {
     return {
       listaCategorias: categoriasOrdenadas,
       mapaCores: cores,
-      listaSubbacias: Array.from(bacias).sort((a, b) => a.localeCompare(b, 'pt-BR')),
+      listaSubbacias: Array.from(bacias).sort((a, b) =>
+        String(a).localeCompare(String(b), 'pt-BR', { numeric: true })
+      ),
     };
   }, [brutoEmpresas, brutoRodovias, exibirEmpresas, exibirRodovias]);
 
@@ -447,7 +457,7 @@ export default function App() {
       if (incValida < inclinacaoMin || incValida > inclinacaoMax) return false;
 
       if (aplicarBuscaEstabelecimento && termo !== '') {
-        const desc = String(p.descricao_estabelecimento || '').toLowerCase();
+        const desc = String(p.descricao_estabelecimento ?? '').toLowerCase();
         if (!desc.includes(termo)) return false;
       }
 
@@ -810,8 +820,8 @@ export default function App() {
                     <div className="flex items-center justify-between gap-2 border-b border-slate-200 pb-1">
                       <span className="font-bold text-sm text-slate-900">
                         {selecionado.feature.properties?._camadaOrigem === 'Malha Rodoviária'
-                          ? selecionado.feature.properties?.codigo_rodovia || 'Trecho Rodoviário'
-                          : selecionado.feature.properties?.categoria || 'Estabelecimento'}
+                          ? String(selecionado.feature.properties?.codigo_rodovia || 'Trecho Rodoviário')
+                          : obterCategoriaItem(selecionado.feature.properties || {})}
                       </span>
                       <span
                         className={`text-[10px] px-1.5 py-0.5 rounded font-semibold shrink-0 ${
@@ -824,14 +834,14 @@ export default function App() {
                         }`}
                       >
                         {selecionado.feature.properties?._camadaOrigem === 'Malha Rodoviária'
-                          ? selecionado.feature.properties?.tipo_jurisdicao || 'Rodovia'
+                          ? String(selecionado.feature.properties?.tipo_jurisdicao || 'Rodovia')
                           : 'Estabelecimento'}
                       </span>
                     </div>
 
                     {selecionado.feature.properties?.descricao_estabelecimento && (
                       <p className="text-slate-600 font-medium">
-                        {selecionado.feature.properties.descricao_estabelecimento}
+                        {String(selecionado.feature.properties.descricao_estabelecimento)}
                       </p>
                     )}
 
