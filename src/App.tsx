@@ -24,12 +24,15 @@ import {
   Eye,
   X,
   Loader2,
+  RefreshCw,
+  AlertTriangle,
 } from 'lucide-react';
 
-const GCS_EMPRESAS_URL = import.meta.env.VITE_GCS_GEOJSON_URL as string;
+const GCS_EMPRESAS_URL = import.meta.env.VITE_GCS_GEOJSON_URL as string | undefined;
 const GCS_RODOVIAS_URL = (import.meta.env.VITE_GCS_RODOVIAS_URL ||
-  import.meta.env.VITE_GCS_DNIT_URL) as string;
-const GCS_RIOS_URL = import.meta.env.VITE_GCS_ANA_RIOS_URL as string;
+  import.meta.env.VITE_GCS_DNIT_URL) as string | undefined;
+const GCS_RIOS_URL = (import.meta.env.VITE_GCS_ANA_RIOS_URL ||
+  import.meta.env.VITE_GCS_RIOS_URL) as string | undefined;
 const GOOGLE_MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string;
 
 const TETO_ALTURA_HAND = 30;
@@ -50,6 +53,97 @@ const PALETA_CORES_EMPRESAS: [number, number, number][] = [
   [132, 204, 22],
 ];
 
+// ============================================================================
+// HELPER LEVE DE CACHE NO INDEXEDDB
+// ============================================================================
+const IDB_NOME_BANCO = 'itajai_gis_cache_v1';
+const IDB_STORE = 'camadas_geojson';
+const IDB_TTL_MS = 24 * 60 * 60 * 1000; // 24 horas
+
+function abrirBancoCache(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') {
+      reject(new Error('IndexedDB indisponível'));
+      return;
+    }
+    const req = indexedDB.open(IDB_NOME_BANCO, 1);
+    req.onupgradeneeded = () => {
+      if (!req.result.objectStoreNames.contains(IDB_STORE)) {
+        req.result.createObjectStore(IDB_STORE);
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function lerCacheGeoJson<T>(chave: string, ttlMs = IDB_TTL_MS): Promise<T | null> {
+  try {
+    const db = await abrirBancoCache();
+    return await new Promise((resolve) => {
+      const tx = db.transaction(IDB_STORE, 'readonly');
+      const req = tx.objectStore(IDB_STORE).get(chave);
+      req.onsuccess = () => {
+        const reg = req.result;
+        if (
+          reg &&
+          Array.isArray(reg.dados) &&
+          reg.dados.length > 0 &&
+          Date.now() - reg.salvoEm < ttlMs
+        ) {
+          resolve(reg.dados as T);
+        } else {
+          resolve(null);
+        }
+      };
+      req.onerror = () => resolve(null);
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function salvarCacheGeoJson<T>(chave: string, dados: T): Promise<void> {
+  try {
+    if (!Array.isArray(dados) || dados.length === 0) return;
+    const db = await abrirBancoCache();
+    await new Promise<void>((resolve) => {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      tx.objectStore(IDB_STORE).put({ salvoEm: Date.now(), dados }, chave);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    });
+  } catch {
+    // Falha silenciosa se não houver espaço em disco ou modo anônimo restrito
+  }
+}
+
+async function limparCacheGeoJson(): Promise<void> {
+  try {
+    const db = await abrirBancoCache();
+    await new Promise<void>((resolve) => {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      tx.objectStore(IDB_STORE).clear();
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    });
+  } catch {
+    // Ignora erros de limpeza
+  }
+}
+
+function normalizarUrlCamada(urlBruta: string | undefined): string {
+  if (!urlBruta) return '';
+  const limpa = urlBruta.trim().replace(/^['"]+|['"]+$/g, '');
+  if (limpa.startsWith('gs://')) {
+    return `https://storage.googleapis.com/${limpa.slice(5)}`;
+  }
+  return limpa;
+}
+
+// ============================================================================
+// TIPAGENS E FUNÇÕES UTILITÁRIAS
+// ============================================================================
 type AlvoBuscaDados = 'estabelecimentos' | 'estradas' | 'rios';
 
 interface GeoFeature {
@@ -561,14 +655,15 @@ function CamadasDeckGL({
           pickable: true,
           stroked: true,
           filled: false,
+          lineWidthUnits: 'pixels',
           lineWidthMinPixels: 1.5,
-          lineWidthMaxPixels: 9,
+          lineWidthMaxPixels: 10,
           getLineWidth: (f: any) => {
             const p = f.properties || {};
             const isSel =
               cotrechoSelecionado !== null && Number(p.cotrecho) === cotrechoSelecionado;
             const strahler = Number(p.ordem_strahler || 1);
-            return isSel ? Math.max(strahler * 12, 32) : Math.max(strahler * 5, 8);
+            return isSel ? Math.max(strahler + 3, 6) : Math.max(strahler * 0.85, 1.8);
           },
           getLineColor: (f: any) => {
             const p = f.properties || {};
@@ -576,7 +671,7 @@ function CamadasDeckGL({
               cotrechoSelecionado !== null && Number(p.cotrecho) === cotrechoSelecionado;
             if (isSel) return [245, 158, 11, 255];
             const strahler = Number(p.ordem_strahler || 1);
-            return strahler >= 4 ? [2, 132, 199, 235] : [14, 165, 233, 195];
+            return strahler >= 4 ? [2, 132, 199, 240] : [14, 165, 233, 210];
           },
           onClick: (info: any) => {
             if (info.object) {
@@ -698,6 +793,8 @@ export default function App() {
   const [carregandoEmpresas, setCarregandoEmpresas] = useState(true);
   const [carregandoRodovias, setCarregandoRodovias] = useState(false);
   const [carregandoRios, setCarregandoRios] = useState(false);
+  const [avisoRios, setAvisoRios] = useState<string | null>(null);
+  const [cicloRecarga, setCicloRecarga] = useState(0);
 
   const [exibirEmpresas, setExibirEmpresas] = useState(true);
   const [exibirRodovias, setExibirRodovias] = useState(true);
@@ -727,33 +824,90 @@ export default function App() {
 
   useEffect(() => {
     let cancelado = false;
+    const ignorarCache = cicloRecarga > 0;
 
     const buscarCamada = async (
-      url: string | undefined,
+      urlBruta: string | undefined,
       nomeCamada: 'Estabelecimentos' | 'Malha Rodoviária' | 'Hidrografia (ANA)'
-    ): Promise<GeoFeature[]> => {
-      if (!url || !url.startsWith('http')) return [];
+    ): Promise<{ features: GeoFeature[]; erro?: string }> => {
+      const url = normalizarUrlCamada(urlBruta);
+      if (!url) {
+        return {
+          features: [],
+          erro: 'Variável VITE_GCS_ANA_RIOS_URL vazia ou servidor Vite não reiniciado após editar o .env.',
+        };
+      }
+
+      const chaveCache = `${nomeCamada}::${url}`;
+      if (!ignorarCache) {
+        const emCache = await lerCacheGeoJson<GeoFeature[]>(chaveCache);
+        if (emCache && emCache.length > 0) {
+          return { features: emCache };
+        }
+      }
+
       try {
         const res = await fetch(url);
-        if (!res.ok) return [];
-        const geojson = await res.json();
-        const features: GeoFeature[] = geojson.features || [];
-        return features.map((f) => ({
-          ...f,
-          properties: { ...(f.properties || {}), _camadaOrigem: nomeCamada },
-        }));
-      } catch (err) {
+        if (!res.ok) {
+          return {
+            features: [],
+            erro: `Falha HTTP ${res.status} ao baixar de ${url}`,
+          };
+        }
+
+        // Usa text() + sanitização caso o GeoJSON exportado de Python contenha NaN/Infinity
+        const textoBruto = await res.text();
+        let geojson: any;
+        try {
+          geojson = JSON.parse(textoBruto);
+        } catch {
+          const textoSanitizado = textoBruto.replace(
+            /:\s*(NaN|-?Infinity)\b/g,
+            ': null'
+          );
+          geojson = JSON.parse(textoSanitizado);
+        }
+
+        const listaBruta: GeoFeature[] = Array.isArray(geojson)
+          ? geojson
+          : Array.isArray(geojson?.features)
+          ? geojson.features
+          : [];
+
+        const processados = listaBruta
+          .filter((f) => f && f.geometry && f.geometry.coordinates)
+          .map((f) => ({
+            ...f,
+            properties: { ...(f.properties || {}), _camadaOrigem: nomeCamada },
+          }));
+
+        if (processados.length === 0) {
+          return {
+            features: [],
+            erro: 'O arquivo GeoJSON foi baixado, mas não contém features válidas.',
+          };
+        }
+
+        void salvarCacheGeoJson(chaveCache, processados);
+        return { features: processados };
+      } catch (err: any) {
         console.error(`Erro ao carregar ${nomeCamada}:`, err);
-        return [];
+        return {
+          features: [],
+          erro: `Erro de rede/CORS ao acessar a URL dos rios (${err?.message || 'falha no fetch'}).`,
+        };
       }
     };
 
     const carregarSequencialmente = async () => {
+      setAvisoRios(null);
+
       // 1ª Etapa: Carrega e exibe somente Estabelecimentos primeiro
       setCarregandoEmpresas(true);
-      const emp = await buscarCamada(GCS_EMPRESAS_URL, 'Estabelecimentos');
+      const resEmp = await buscarCamada(GCS_EMPRESAS_URL, 'Estabelecimentos');
       if (cancelado) return;
 
+      const emp = resEmp.features;
       const catsEmp = new Set<string>();
       let maxInc = 45;
 
@@ -770,15 +924,16 @@ export default function App() {
       setInclinacaoMax(maxInc);
       setCarregandoEmpresas(false);
 
-      // Aguarda o navegador desenhar os estabelecimentos no mapa antes de iniciar a próxima carga
+      // Aguarda o navegador pintar os estabelecimentos antes de iniciar as rodovias
       await aguardarProximoFrame();
       if (cancelado) return;
 
       // 2ª Etapa: Carrega e exibe a Malha Rodoviária
       setCarregandoRodovias(true);
-      const rod = await buscarCamada(GCS_RODOVIAS_URL, 'Malha Rodoviária');
+      const resRod = await buscarCamada(GCS_RODOVIAS_URL, 'Malha Rodoviária');
       if (cancelado) return;
 
+      const rod = resRod.features;
       const catsRod = new Set<string>();
       let novoMaxInc = maxInc;
 
@@ -797,16 +952,19 @@ export default function App() {
       }
       setCarregandoRodovias(false);
 
-      // Aguarda o navegador desenhar as rodovias antes de carregar os rios
+      // Aguarda o navegador pintar as rodovias antes de carregar os rios
       await aguardarProximoFrame();
       if (cancelado) return;
 
       // 3ª Etapa: Por último, carrega e exibe os Rios (ANA)
       setCarregandoRios(true);
-      const rios = await buscarCamada(GCS_RIOS_URL, 'Hidrografia (ANA)');
+      const resRios = await buscarCamada(GCS_RIOS_URL, 'Hidrografia (ANA)');
       if (cancelado) return;
 
-      setBrutoRios(rios);
+      setBrutoRios(resRios.features);
+      if (resRios.erro) {
+        setAvisoRios(resRios.erro);
+      }
       setCarregandoRios(false);
     };
 
@@ -815,7 +973,16 @@ export default function App() {
     return () => {
       cancelado = true;
     };
-  }, []);
+  }, [cicloRecarga]);
+
+  const forcarAtualizacaoCache = async () => {
+    await limparCacheGeoJson();
+    setBrutoEmpresas([]);
+    setBrutoRodovias([]);
+    setBrutoRios([]);
+    setSelecionado(null);
+    setCicloRecarga((c) => c + 1);
+  };
 
   const { listaCategorias, mapaCores, listaSubbacias } = useMemo(() => {
     const cats = new Set<string>();
@@ -1057,6 +1224,8 @@ export default function App() {
       ? 'Ex: BR-470, SC-110, Federal, Estadual...'
       : 'Ex: Rio Itajaí-Açu, Benedito, cód. trecho...';
 
+  const algumaCargaAtiva = carregandoEmpresas || carregandoRodovias || carregandoRios;
+
   return (
     <APIProvider apiKey={GOOGLE_MAPS_API_KEY} language="pt-BR" region="BR">
       <div className="flex flex-col h-screen w-screen bg-slate-50 text-slate-800 font-sans overflow-hidden">
@@ -1145,6 +1314,17 @@ export default function App() {
                   : `(${riosFiltrados.length.toLocaleString('pt-BR')})`}
               </span>
             </button>
+
+            <button
+              type="button"
+              disabled={algumaCargaAtiva}
+              onClick={forcarAtualizacaoCache}
+              title="Limpar cache local (IndexedDB) e baixar dados novamente do Cloud Storage"
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-300 hover:text-white hover:bg-slate-700/80 disabled:opacity-40 transition-colors cursor-pointer"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${algumaCargaAtiva ? 'animate-spin' : ''}`} />
+              <span className="hidden md:inline">Atualizar base</span>
+            </button>
           </div>
 
           <div className="hidden xl:flex items-center gap-6 text-sm">
@@ -1181,7 +1361,7 @@ export default function App() {
                 <div className="w-8 h-8 border-3 border-blue-600 border-t-transparent rounded-full animate-spin mb-3" />
                 <p className="text-sm font-medium">Carregando estabelecimentos...</p>
                 <p className="text-xs text-slate-400 mt-1">
-                  Rodovias e rios serão carregados em seguida automaticamente
+                  Rodovias e rios serão carregados em seguida (com cache local IndexedDB)
                 </p>
               </div>
             ) : (
@@ -1194,6 +1374,16 @@ export default function App() {
                         ? 'Carregando malha rodoviária em segundo plano...'
                         : 'Carregando hidrografia (ANA) em segundo plano...'}
                     </span>
+                  </div>
+                )}
+
+                {avisoRios && (
+                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800 flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                    <div>
+                      <strong className="block font-semibold">Rios não carregados:</strong>
+                      <span>{avisoRios}</span>
+                    </div>
                   </div>
                 )}
 
