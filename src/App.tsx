@@ -16,20 +16,26 @@ import {
 } from 'lucide-react';
 
 const GCS_EMPRESAS_URL = import.meta.env.VITE_GCS_GEOJSON_URL as string;
-const GCS_DNIT_URL = import.meta.env.VITE_GCS_DNIT_URL as string;
+const GCS_RODOVIAS_URL = (import.meta.env.VITE_GCS_RODOVIAS_URL ||
+  import.meta.env.VITE_GCS_DNIT_URL) as string;
 const GOOGLE_MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string;
 
 const TETO_ALTURA_HAND = 30;
 
-const PALETA_CORES: [number, number, number][] = [
-  [239, 68, 68],
+const CORES_FIXAS_RODOVIAS: Record<string, [number, number, number]> = {
+  'Rodovia Federal': [234, 88, 12],   // Laranja intenso
+  'Rodovia Estadual': [124, 58, 237], // Roxo / Violeta
+};
+
+const PALETA_CORES_EMPRESAS: [number, number, number][] = [
   [59, 130, 246],
   [16, 185, 129],
-  [245, 158, 11],
-  [139, 92, 246],
+  [239, 68, 68],
   [236, 72, 153],
   [6, 182, 212],
-  [249, 115, 22],
+  [245, 158, 11],
+  [99, 102, 241],
+  [132, 204, 22],
 ];
 
 interface GeoFeature {
@@ -39,20 +45,42 @@ interface GeoFeature {
     coordinates: any;
   };
   properties: {
+    // Campos comuns / Estabelecimentos
     categoria?: string;
-    altura_min_acima_do_rio_m?: number;
-    Inclinaxao_graus?: number;
-    inclinacao_graus?: number;
-    nome_subbacia_n6?: string;
     descricao_estabelecimento?: string;
-    vl_br?: string | number;
-    nm_tipo_tr?: string;
-    ds_local_i?: string;
-    ds_local_f?: string;
-    vl_km_inic?: string | number;
-    vl_km_fina?: string | number;
-    ds_superfi?: string;
-    _camadaOrigem?: string;
+    nome_subbacia_n6?: string;
+    Inclinaxao_graus?: number;
+
+    // Campos de itajai_malha_rodoviaria_consolidada_split
+    tipo_jurisdicao?: string;
+    id_trecho_origem?: string;
+    codigo_rodovia?: string;
+    administracao?: string;
+    tipo_superficie?: string;
+    condicao_trecho?: string;
+    km_inicial?: number;
+    km_final?: number;
+    extensao_subtrecho_m?: number;
+    id_quadradinho?: string;
+    subbacia_n6?: string;
+    cobacia?: string;
+    cotrecho?: number;
+    noriocomp?: string;
+    dist_ate_rio_m?: number;
+    cota_base_rio_ottobacia_m?: number;
+    altitude_min_m?: number;
+    altitude_media_m?: number;
+    altitude_max_m?: number;
+    desnivel_interno_30m_m?: number;
+    inclinacao_pct?: number;
+    inclinacao_graus?: number;
+    classe_risco_deslizamento?: string;
+    altura_min_acima_do_rio_m?: number;
+    altura_media_acima_do_rio_m?: number;
+    altura_max_acima_do_rio_m?: number;
+    cota_pista_estimada_m?: number;
+
+    _camadaOrigem?: 'Estabelecimentos' | 'Malha Rodoviária';
     [key: string]: any;
   };
 }
@@ -69,6 +97,21 @@ function extrairPrimeiroPonto(coords: any): [number, number] {
     return [coords[0], coords[1]];
   }
   return extrairPrimeiroPonto(coords[0]);
+}
+
+function obterCategoriaItem(p: Record<string, any>): string {
+  if (p._camadaOrigem === 'Malha Rodoviária') {
+    const jur = String(p.tipo_jurisdicao || '').trim().toLowerCase();
+    if (jur.includes('fed')) return 'Rodovia Federal';
+    if (jur.includes('est')) return 'Rodovia Estadual';
+    if (p.tipo_jurisdicao) return `Rodovia (${p.tipo_jurisdicao})`;
+    return 'Rodovia (Outras)';
+  }
+  return p.categoria || 'Não classificado';
+}
+
+function obterSubbaciaItem(p: Record<string, any>): string {
+  return p.nome_subbacia_n6 || p.subbacia_n6 || '';
 }
 
 function BarraIntervaloDuplo({
@@ -160,16 +203,16 @@ function BarraIntervaloDuplo({
 
 function CamadasDeckGL({
   dadosEmpresas,
-  dadosDnit,
+  dadosRodovias,
   exibirEmpresas,
-  exibirDnit,
+  exibirRodovias,
   mapaCores,
   aoSelecionar,
 }: {
   dadosEmpresas: GeoFeature[];
-  dadosDnit: GeoFeature[];
+  dadosRodovias: GeoFeature[];
   exibirEmpresas: boolean;
-  exibirDnit: boolean;
+  exibirRodovias: boolean;
   mapaCores: Record<string, [number, number, number]>;
   aoSelecionar: (sel: SelecaoMapa | null) => void;
 }) {
@@ -189,11 +232,11 @@ function CamadasDeckGL({
 
     const camadas: any[] = [];
 
-    if (exibirDnit && dadosDnit.length > 0) {
+    if (exibirRodovias && dadosRodovias.length > 0) {
       camadas.push(
         new GeoJsonLayer({
-          id: 'camada-rodovias-dnit',
-          data: { type: 'FeatureCollection', features: dadosDnit } as any,
+          id: 'camada-malha-rodoviaria',
+          data: { type: 'FeatureCollection', features: dadosRodovias } as any,
           pickable: true,
           stroked: true,
           filled: true,
@@ -204,14 +247,14 @@ function CamadasDeckGL({
           pointRadiusMaxPixels: 12,
           getPointRadius: 22,
           getLineColor: (f: any) => {
-            const cat = f.properties?.categoria || 'Rodovia DNIT';
-            const cor = mapaCores[cat] || [245, 158, 11];
-            return [cor[0], cor[1], cor[2], 230];
+            const cat = obterCategoriaItem(f.properties || {});
+            const cor = mapaCores[cat] || CORES_FIXAS_RODOVIAS[cat] || [13, 148, 136];
+            return [cor[0], cor[1], cor[2], 235];
           },
           getFillColor: (f: any) => {
-            const cat = f.properties?.categoria || 'Rodovia DNIT';
-            const cor = mapaCores[cat] || [245, 158, 11];
-            return [cor[0], cor[1], cor[2], 220];
+            const cat = obterCategoriaItem(f.properties || {});
+            const cor = mapaCores[cat] || CORES_FIXAS_RODOVIAS[cat] || [13, 148, 136];
+            return [cor[0], cor[1], cor[2], 225];
           },
           onClick: (info: any) => {
             if (info.object) {
@@ -243,7 +286,7 @@ function CamadasDeckGL({
           lineWidthMinPixels: 1,
           getPointRadius: 25,
           getFillColor: (f: any) => {
-            const cat = f.properties?.categoria || 'Não classificado';
+            const cat = obterCategoriaItem(f.properties || {});
             return mapaCores[cat] || [100, 116, 139];
           },
           getLineColor: [255, 255, 255, 210],
@@ -263,18 +306,18 @@ function CamadasDeckGL({
     }
 
     overlayRef.current.setProps({ layers: camadas });
-  }, [dadosEmpresas, dadosDnit, exibirEmpresas, exibirDnit, mapaCores, aoSelecionar]);
+  }, [dadosEmpresas, dadosRodovias, exibirEmpresas, exibirRodovias, mapaCores, aoSelecionar]);
 
   return null;
 }
 
 export default function App() {
   const [brutoEmpresas, setBrutoEmpresas] = useState<GeoFeature[]>([]);
-  const [brutoDnit, setBrutoDnit] = useState<GeoFeature[]>([]);
+  const [brutoRodovias, setBrutoRodovias] = useState<GeoFeature[]>([]);
   const [carregando, setCarregando] = useState(true);
 
   const [exibirEmpresas, setExibirEmpresas] = useState(true);
-  const [exibirDnit, setExibirDnit] = useState(true);
+  const [exibirRodovias, setExibirRodovias] = useState(true);
   const [selecionado, setSelecionado] = useState<SelecaoMapa | null>(null);
 
   const [categoriasAtivas, setCategoriasAtivas] = useState<string[]>([]);
@@ -290,7 +333,10 @@ export default function App() {
   const [buscaPalavraChave, setBuscaPalavraChave] = useState<string>('');
 
   useEffect(() => {
-    const buscarCamada = async (url: string | undefined, nomeCamada: string): Promise<GeoFeature[]> => {
+    const buscarCamada = async (
+      url: string | undefined,
+      nomeCamada: 'Estabelecimentos' | 'Malha Rodoviária'
+    ): Promise<GeoFeature[]> => {
       if (!url || !url.startsWith('http')) return [];
       try {
         const res = await fetch(url);
@@ -309,19 +355,18 @@ export default function App() {
 
     Promise.all([
       buscarCamada(GCS_EMPRESAS_URL, 'Estabelecimentos'),
-      buscarCamada(GCS_DNIT_URL, 'Rodovias DNIT'),
-    ]).then(([emp, dnit]) => {
+      buscarCamada(GCS_RODOVIAS_URL, 'Malha Rodoviária'),
+    ]).then(([emp, rod]) => {
       setBrutoEmpresas(emp);
-      setBrutoDnit(dnit);
+      setBrutoRodovias(rod);
 
-      const todas = [...emp, ...dnit];
+      const todas = [...emp, ...rod];
       const cats = new Set<string>();
       let maxInc = 45;
 
       todas.forEach((f) => {
         const p = f.properties || {};
-        const padrao = p._camadaOrigem === 'Rodovias DNIT' ? 'Rodovia DNIT' : 'Não classificado';
-        cats.add(p.categoria || padrao);
+        cats.add(obterCategoriaItem(p));
 
         const inc = Number(p.Inclinaxao_graus ?? p.inclinacao_graus);
         if (!isNaN(inc) && inc > maxInc) maxInc = Math.ceil(inc);
@@ -339,54 +384,71 @@ export default function App() {
     const bacias = new Set<string>();
     const ativos = [
       ...(exibirEmpresas ? brutoEmpresas : []),
-      ...(exibirDnit ? brutoDnit : []),
+      ...(exibirRodovias ? brutoRodovias : []),
     ];
 
     ativos.forEach((f) => {
       const p = f.properties || {};
-      const padrao = p._camadaOrigem === 'Rodovias DNIT' ? 'Rodovia DNIT' : 'Não classificado';
-      cats.add(p.categoria || padrao);
-      if (p.nome_subbacia_n6) bacias.add(p.nome_subbacia_n6);
+      cats.add(obterCategoriaItem(p));
+      const bacia = obterSubbaciaItem(p);
+      if (bacia) bacias.add(bacia);
     });
 
-    const categoriasOrdenadas = Array.from(cats).sort();
+    const categoriasOrdenadas = Array.from(cats).sort((a, b) => {
+      const aRod = a.startsWith('Rodovia');
+      const bRod = b.startsWith('Rodovia');
+      if (aRod && !bRod) return -1;
+      if (!aRod && bRod) return 1;
+      return a.localeCompare(b, 'pt-BR');
+    });
+
     const cores: Record<string, [number, number, number]> = {};
-    categoriasOrdenadas.forEach((cat, idx) => {
-      cores[cat] = PALETA_CORES[idx % PALETA_CORES.length];
+    let idxEmp = 0;
+    categoriasOrdenadas.forEach((cat) => {
+      if (CORES_FIXAS_RODOVIAS[cat]) {
+        cores[cat] = CORES_FIXAS_RODOVIAS[cat];
+      } else if (cat.startsWith('Rodovia')) {
+        cores[cat] = [13, 148, 136];
+      } else {
+        cores[cat] = PALETA_CORES_EMPRESAS[idxEmp % PALETA_CORES_EMPRESAS.length];
+        idxEmp += 1;
+      }
     });
 
     return {
       listaCategorias: categoriasOrdenadas,
       mapaCores: cores,
-      listaSubbacias: Array.from(bacias).sort(),
+      listaSubbacias: Array.from(bacias).sort((a, b) => a.localeCompare(b, 'pt-BR')),
     };
-  }, [brutoEmpresas, brutoDnit, exibirEmpresas, exibirDnit]);
+  }, [brutoEmpresas, brutoRodovias, exibirEmpresas, exibirRodovias]);
 
-  const filtrarLista = (lista: GeoFeature[], padraoCat: string) => {
+  const filtrarLista = (lista: GeoFeature[], aplicarBuscaEstabelecimento: boolean) => {
     const termo = buscaPalavraChave.trim().toLowerCase();
     const setCats = new Set(categoriasAtivas);
 
     return lista.filter((item) => {
       const p = item.properties || {};
-      const cat = p.categoria || padraoCat;
+      const cat = obterCategoriaItem(p);
       if (!setCats.has(cat)) return false;
 
-      if (subbaciaSelecionada !== 'todas' && p.nome_subbacia_n6 !== subbaciaSelecionada) {
+      if (subbaciaSelecionada !== 'todas' && obterSubbaciaItem(p) !== subbaciaSelecionada) {
         return false;
       }
 
       const alturaBruta = Number(p.altura_min_acima_do_rio_m ?? 0);
-      const alturaTratada = Math.min(TETO_ALTURA_HAND, Math.max(0, isNaN(alturaBruta) ? 0 : alturaBruta));
+      const alturaTratada = Math.min(
+        TETO_ALTURA_HAND,
+        Math.max(0, isNaN(alturaBruta) ? 0 : alturaBruta)
+      );
       if (alturaTratada < alturaMinCota || alturaTratada > alturaMaxCota) return false;
 
       const inclinacao = Number(p.Inclinaxao_graus ?? p.inclinacao_graus ?? 0);
       const incValida = isNaN(inclinacao) ? 0 : inclinacao;
       if (incValida < inclinacaoMin || incValida > inclinacaoMax) return false;
 
-      if (termo !== '') {
-        const brFormatada = p.vl_br ? `br-${p.vl_br} br ${p.vl_br}` : '';
-        const textoBusca = `${p.descricao_estabelecimento || ''} ${brFormatada} ${p.nm_tipo_tr || ''} ${p.ds_local_i || ''} ${p.ds_local_f || ''} ${p.ds_superfi || ''} ${cat}`.toLowerCase();
-        if (!textoBusca.includes(termo)) return false;
+      if (aplicarBuscaEstabelecimento && termo !== '') {
+        const desc = String(p.descricao_estabelecimento || '').toLowerCase();
+        if (!desc.includes(termo)) return false;
       }
 
       return true;
@@ -394,27 +456,48 @@ export default function App() {
   };
 
   const empresasFiltradas = useMemo(
-    () => (exibirEmpresas ? filtrarLista(brutoEmpresas, 'Não classificado') : []),
-    [brutoEmpresas, exibirEmpresas, categoriasAtivas, subbaciaSelecionada, alturaMinCota, alturaMaxCota, inclinacaoMin, inclinacaoMax, buscaPalavraChave]
+    () => (exibirEmpresas ? filtrarLista(brutoEmpresas, true) : []),
+    [
+      brutoEmpresas,
+      exibirEmpresas,
+      categoriasAtivas,
+      subbaciaSelecionada,
+      alturaMinCota,
+      alturaMaxCota,
+      inclinacaoMin,
+      inclinacaoMax,
+      buscaPalavraChave,
+    ]
   );
 
-  const dnitFiltrado = useMemo(
-    () => (exibirDnit ? filtrarLista(brutoDnit, 'Rodovia DNIT') : []),
-    [brutoDnit, exibirDnit, categoriasAtivas, subbaciaSelecionada, alturaMinCota, alturaMaxCota, inclinacaoMin, inclinacaoMax, buscaPalavraChave]
+  const rodoviasFiltradas = useMemo(
+    () => (exibirRodovias ? filtrarLista(brutoRodovias, false) : []),
+    [
+      brutoRodovias,
+      exibirRodovias,
+      categoriasAtivas,
+      subbaciaSelecionada,
+      alturaMinCota,
+      alturaMaxCota,
+      inclinacaoMin,
+      inclinacaoMax,
+    ]
   );
 
-  const totalFiltrados = empresasFiltradas.length + dnitFiltrado.length;
-  const totalAtivosBrutos = (exibirEmpresas ? brutoEmpresas.length : 0) + (exibirDnit ? brutoDnit.length : 0);
+  const totalFiltrados = empresasFiltradas.length + rodoviasFiltradas.length;
+  const totalAtivosBrutos =
+    (exibirEmpresas ? brutoEmpresas.length : 0) + (exibirRodovias ? brutoRodovias.length : 0);
 
   const alternarCategoria = (cat: string) => {
-    setCategoriasAtivas((prev) => (prev.includes(cat) ? prev.filter((c) => c !== cat) : [...prev, cat]));
+    setCategoriasAtivas((prev) =>
+      prev.includes(cat) ? prev.filter((c) => c !== cat) : [...prev, cat]
+    );
   };
 
   const resetarFiltros = () => {
     const todasCats = new Set<string>();
-    [...brutoEmpresas, ...brutoDnit].forEach((f) => {
-      const p = f.properties || {};
-      todasCats.add(p.categoria || (p._camadaOrigem === 'Rodovias DNIT' ? 'Rodovia DNIT' : 'Não classificado'));
+    [...brutoEmpresas, ...brutoRodovias].forEach((f) => {
+      todasCats.add(obterCategoriaItem(f.properties || {}));
     });
     setCategoriasAtivas(Array.from(todasCats));
     setSubbaciaSelecionada('todas');
@@ -426,16 +509,18 @@ export default function App() {
     setSelecionado(null);
   };
 
+  const formatarNum = (val: any, casas = 2, sufixo = '') => {
+    if (val === undefined || val === null || val === '') return '—';
+    const num = Number(val);
+    if (isNaN(num)) return String(val);
+    return `${num.toLocaleString('pt-BR', { maximumFractionDigits: casas })}${sufixo}`;
+  };
+
   const alturaExibidaPonto = (val: any) => {
     const num = Number(val);
     if (isNaN(num)) return '—';
-    return num > TETO_ALTURA_HAND ? `30 m (original: ${num} m)` : `${num} m`;
-  };
-
-  const formatarKm = (val: any) => {
-    if (val === undefined || val === null || val === '') return '—';
-    const num = Number(val);
-    return isNaN(num) ? String(val) : num.toLocaleString('pt-BR', { maximumFractionDigits: 2 });
+    const fmt = num.toLocaleString('pt-BR', { maximumFractionDigits: 2 });
+    return num > TETO_ALTURA_HAND ? `30 m (real: ${fmt} m)` : `${fmt} m`;
   };
 
   return (
@@ -451,7 +536,7 @@ export default function App() {
                 Simulação de Impactos de Inundações na Bacia do Rio Itajaí
               </h1>
               <p className="text-xs text-slate-400 hidden sm:block">
-                Monitoramento geoespacial de exposição hidrodinâmica e infraestrutura
+                Monitoramento geoespacial de exposição hidrodinâmica e infraestrutura viária
               </p>
             </div>
           </div>
@@ -470,20 +555,24 @@ export default function App() {
             >
               <Building2 className="w-3.5 h-3.5" />
               <span>Estabelecimentos</span>
-              <span className="text-[10px] opacity-80">({empresasFiltradas.length.toLocaleString('pt-BR')})</span>
+              <span className="text-[10px] opacity-80">
+                ({empresasFiltradas.length.toLocaleString('pt-BR')})
+              </span>
             </button>
 
             <button
-              onClick={() => setExibirDnit((v) => !v)}
+              onClick={() => setExibirRodovias((v) => !v)}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                exibirDnit
-                  ? 'bg-amber-500 text-slate-950 shadow-sm'
+                exibirRodovias
+                  ? 'bg-orange-600 text-white shadow-sm'
                   : 'bg-transparent text-slate-400 hover:text-slate-200'
               }`}
             >
               <Route className="w-3.5 h-3.5" />
-              <span>Rodovias DNIT</span>
-              <span className="text-[10px] opacity-80">({dnitFiltrado.length.toLocaleString('pt-BR')})</span>
+              <span>Malha Rodoviária</span>
+              <span className="text-[10px] opacity-85">
+                ({rodoviasFiltradas.length.toLocaleString('pt-BR')})
+              </span>
             </button>
           </div>
 
@@ -526,14 +615,14 @@ export default function App() {
               <div className="flex-1 overflow-y-auto p-5 space-y-6">
                 <div>
                   <label className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2 flex items-center gap-1.5">
-                    <Search className="w-3.5 h-3.5" /> Busca por Descrição / Rodovia
+                    <Search className="w-3.5 h-3.5" /> Descrição do Estabelecimento
                   </label>
                   <div className="relative">
                     <input
                       type="text"
                       value={buscaPalavraChave}
                       onChange={(e) => setBuscaPalavraChave(e.target.value)}
-                      placeholder="Ex: hospital, BR-470, Blumenau, pavimentada..."
+                      placeholder="Ex: hospital, escola, supermercado, farmácia..."
                       className="w-full pl-3 pr-8 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:border-blue-500"
                     />
                     {buscaPalavraChave && (
@@ -547,13 +636,30 @@ export default function App() {
                   </div>
                 </div>
 
+                {exibirRodovias && (
+                  <div className="px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between text-xs">
+                    <span className="font-semibold text-slate-600">Jurisdição Viária:</span>
+                    <div className="flex items-center gap-3">
+                      <span className="flex items-center gap-1.5 font-medium text-slate-700">
+                        <span className="w-4 h-1.5 rounded-full bg-orange-600 inline-block" />
+                        Federal
+                      </span>
+                      <span className="flex items-center gap-1.5 font-medium text-slate-700">
+                        <span className="w-4 h-1.5 rounded-full bg-violet-600 inline-block" />
+                        Estadual
+                      </span>
+                    </div>
+                  </div>
+                )}
+
                 <div className="p-3.5 bg-blue-50/60 border border-blue-100 rounded-xl">
                   <div className="flex justify-between items-center mb-1">
                     <label className="text-xs font-semibold text-slate-700 flex items-center gap-1.5">
                       <ArrowUpFromLine className="w-3.5 h-3.5 text-blue-600" /> Altura Acima do Rio (HAND)
                     </label>
                     <span className="text-xs font-bold bg-blue-600 text-white px-2 py-0.5 rounded-full">
-                      {alturaMinCota} m a {alturaMaxCota === TETO_ALTURA_HAND ? '30+ m' : `${alturaMaxCota} m`}
+                      {alturaMinCota} m a{' '}
+                      {alturaMaxCota === TETO_ALTURA_HAND ? '30+ m' : `${alturaMaxCota} m`}
                     </span>
                   </div>
                   <BarraIntervaloDuplo
@@ -619,7 +725,9 @@ export default function App() {
                 <div>
                   <div className="flex items-center justify-between mb-2">
                     <label className="text-xs font-semibold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
-                      <Layers className="w-3.5 h-3.5" /> Categorias ({listaCategorias.filter((c) => categoriasAtivas.includes(c)).length}/{listaCategorias.length})
+                      <Layers className="w-3.5 h-3.5" /> Categorias e Jurisdições (
+                      {listaCategorias.filter((c) => categoriasAtivas.includes(c)).length}/
+                      {listaCategorias.length})
                     </label>
                     <button
                       onClick={() =>
@@ -629,13 +737,16 @@ export default function App() {
                       }
                       className="text-xs text-blue-600 hover:underline cursor-pointer"
                     >
-                      {categoriasAtivas.length >= listaCategorias.length ? 'Desmarcar todas' : 'Marcar todas'}
+                      {categoriasAtivas.length >= listaCategorias.length
+                        ? 'Desmarcar todas'
+                        : 'Marcar todas'}
                     </button>
                   </div>
                   <div className="space-y-1.5 max-h-60 overflow-y-auto pr-1">
                     {listaCategorias.map((cat) => {
                       const [r, g, b] = mapaCores[cat] || [100, 116, 139];
                       const ativo = categoriasAtivas.includes(cat);
+                      const ehRodovia = cat.startsWith('Rodovia');
                       return (
                         <label
                           key={cat}
@@ -648,7 +759,11 @@ export default function App() {
                         >
                           <div className="flex items-center gap-2.5 truncate">
                             <span
-                              className="w-3.5 h-3.5 rounded-full shrink-0 border border-black/15"
+                              className={
+                                ehRodovia
+                                  ? 'w-4 h-1.5 rounded-full shrink-0'
+                                  : 'w-3.5 h-3.5 rounded-full shrink-0 border border-black/15'
+                              }
                               style={{ backgroundColor: `rgb(${r}, ${g}, ${b})` }}
                             />
                             <span className="truncate font-medium text-xs">{cat}</span>
@@ -679,9 +794,9 @@ export default function App() {
               {!carregando && (
                 <CamadasDeckGL
                   dadosEmpresas={empresasFiltradas}
-                  dadosDnit={dnitFiltrado}
+                  dadosRodovias={rodoviasFiltradas}
                   exibirEmpresas={exibirEmpresas}
-                  exibirDnit={exibirDnit}
+                  exibirRodovias={exibirRodovias}
                   mapaCores={mapaCores}
                   aoSelecionar={setSelecionado}
                 />
@@ -691,18 +806,26 @@ export default function App() {
                   position={{ lat: selecionado.lat, lng: selecionado.lng }}
                   onCloseClick={() => setSelecionado(null)}
                 >
-                  <div className="p-1 max-w-xs text-slate-800 text-xs space-y-1.5">
+                  <div className="p-1 max-w-xs max-h-80 overflow-y-auto text-slate-800 text-xs space-y-1.5">
                     <div className="flex items-center justify-between gap-2 border-b border-slate-200 pb-1">
                       <span className="font-bold text-sm text-slate-900">
-                        {selecionado.feature.properties?._camadaOrigem === 'Rodovias DNIT' &&
-                        selecionado.feature.properties?.vl_br
-                          ? `BR-${selecionado.feature.properties.vl_br}`
-                          : selecionado.feature.properties?.categoria ||
-                            selecionado.feature.properties?._camadaOrigem ||
-                            'Registro'}
+                        {selecionado.feature.properties?._camadaOrigem === 'Malha Rodoviária'
+                          ? selecionado.feature.properties?.codigo_rodovia || 'Trecho Rodoviário'
+                          : selecionado.feature.properties?.categoria || 'Estabelecimento'}
                       </span>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-medium shrink-0">
-                        {selecionado.feature.properties?._camadaOrigem}
+                      <span
+                        className={`text-[10px] px-1.5 py-0.5 rounded font-semibold shrink-0 ${
+                          selecionado.feature.properties?._camadaOrigem === 'Malha Rodoviária'
+                            ? obterCategoriaItem(selecionado.feature.properties) ===
+                              'Rodovia Federal'
+                              ? 'bg-orange-100 text-orange-800'
+                              : 'bg-violet-100 text-violet-800'
+                            : 'bg-blue-50 text-blue-700'
+                        }`}
+                      >
+                        {selecionado.feature.properties?._camadaOrigem === 'Malha Rodoviária'
+                          ? selecionado.feature.properties?.tipo_jurisdicao || 'Rodovia'
+                          : 'Estabelecimento'}
                       </span>
                     </div>
 
@@ -712,58 +835,94 @@ export default function App() {
                       </p>
                     )}
 
-                    {selecionado.feature.properties?._camadaOrigem === 'Rodovias DNIT' && (
+                    {selecionado.feature.properties?._camadaOrigem === 'Malha Rodoviária' && (
                       <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 py-1.5 border-b border-slate-100 text-[11px]">
-                        <span className="text-slate-500">Rodovia (vl_br):</span>
+                        <span className="text-slate-500">Administração:</span>
                         <span className="font-semibold">
-                          {selecionado.feature.properties?.vl_br
-                            ? `BR-${selecionado.feature.properties.vl_br}`
-                            : '—'}
-                        </span>
-
-                        <span className="text-slate-500">Tipo de trecho:</span>
-                        <span className="font-semibold">
-                          {selecionado.feature.properties?.nm_tipo_tr || '—'}
-                        </span>
-
-                        <span className="text-slate-500">Início:</span>
-                        <span className="font-semibold">
-                          {selecionado.feature.properties?.ds_local_i || '—'}
-                        </span>
-
-                        <span className="text-slate-500">Fim:</span>
-                        <span className="font-semibold">
-                          {selecionado.feature.properties?.ds_local_f || '—'}
-                        </span>
-
-                        <span className="text-slate-500">Quilometragem:</span>
-                        <span className="font-semibold">
-                          km {formatarKm(selecionado.feature.properties?.vl_km_inic)} ao km{' '}
-                          {formatarKm(selecionado.feature.properties?.vl_km_fina)}
+                          {selecionado.feature.properties?.administracao || '—'}
                         </span>
 
                         <span className="text-slate-500">Superfície:</span>
                         <span className="font-semibold">
-                          {selecionado.feature.properties?.ds_superfi || '—'}
+                          {selecionado.feature.properties?.tipo_superficie || '—'}
+                        </span>
+
+                        <span className="text-slate-500">Condição:</span>
+                        <span className="font-semibold">
+                          {selecionado.feature.properties?.condicao_trecho || '—'}
+                        </span>
+
+                        <span className="text-slate-500">Quilometragem:</span>
+                        <span className="font-semibold">
+                          km {formatarNum(selecionado.feature.properties?.km_inicial, 2)} ao km{' '}
+                          {formatarNum(selecionado.feature.properties?.km_final, 2)}
+                        </span>
+
+                        <span className="text-slate-500">Extensão subtrecho:</span>
+                        <span className="font-semibold">
+                          {formatarNum(selecionado.feature.properties?.extensao_subtrecho_m, 1, ' m')}
+                        </span>
+
+                        <span className="text-slate-500">Rio de referência:</span>
+                        <span className="font-semibold">
+                          {selecionado.feature.properties?.noriocomp || '—'} (
+                          {formatarNum(selecionado.feature.properties?.dist_ate_rio_m, 0, ' m')})
+                        </span>
+
+                        <span className="text-slate-500">Cota estimada pista:</span>
+                        <span className="font-semibold">
+                          {formatarNum(selecionado.feature.properties?.cota_pista_estimada_m, 2, ' m')}
+                        </span>
+
+                        <span className="text-slate-500">Risco deslizamento:</span>
+                        <span className="font-semibold">
+                          {selecionado.feature.properties?.classe_risco_deslizamento || '—'}
                         </span>
                       </div>
                     )}
 
                     <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 pt-0.5 text-[11px]">
-                      <span className="text-slate-500">Altura sobre o rio:</span>
+                      <span className="text-slate-500">HAND mín. sobre rio:</span>
                       <span className="font-semibold">
-                        {alturaExibidaPonto(selecionado.feature.properties?.altura_min_acima_do_rio_m)}
+                        {alturaExibidaPonto(
+                          selecionado.feature.properties?.altura_min_acima_do_rio_m
+                        )}
                       </span>
+
+                      {selecionado.feature.properties?._camadaOrigem === 'Malha Rodoviária' && (
+                        <>
+                          <span className="text-slate-500">HAND méd. / máx.:</span>
+                          <span className="font-semibold">
+                            {formatarNum(
+                              selecionado.feature.properties?.altura_media_acima_do_rio_m,
+                              2,
+                              ' m'
+                            )}{' '}
+                            /{' '}
+                            {formatarNum(
+                              selecionado.feature.properties?.altura_max_acima_do_rio_m,
+                              2,
+                              ' m'
+                            )}
+                          </span>
+                        </>
+                      )}
+
                       <span className="text-slate-500">Inclinação:</span>
                       <span className="font-semibold">
-                        {selecionado.feature.properties?.Inclinaxao_graus ??
-                          selecionado.feature.properties?.inclinacao_graus ??
-                          '—'}
-                        °
+                        {formatarNum(
+                          selecionado.feature.properties?.Inclinaxao_graus ??
+                            selecionado.feature.properties?.inclinacao_graus,
+                          1,
+                          '°'
+                        )}
+                        {selecionado.feature.properties?.inclinacao_pct !== undefined &&
+                          ` (${formatarNum(selecionado.feature.properties.inclinacao_pct, 1, '%')})`}
                       </span>
+
                       <span className="text-slate-500">Sub-bacia N6:</span>
                       <span className="font-semibold">
-                        {selecionado.feature.properties?.nome_subbacia_n6 || '—'}
+                        {obterSubbaciaItem(selecionado.feature.properties || {}) || '—'}
                       </span>
                     </div>
                   </div>
