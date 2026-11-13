@@ -23,6 +23,7 @@ import {
   Navigation,
   Eye,
   X,
+  Loader2,
 } from 'lucide-react';
 
 const GCS_EMPRESAS_URL = import.meta.env.VITE_GCS_GEOJSON_URL as string;
@@ -49,7 +50,7 @@ const PALETA_CORES_EMPRESAS: [number, number, number][] = [
   [132, 204, 22],
 ];
 
-type AlvoBusca = 'enderecos' | 'estradas' | 'rios';
+type AlvoBuscaDados = 'estabelecimentos' | 'estradas' | 'rios';
 
 interface GeoFeature {
   type: 'Feature';
@@ -153,6 +154,12 @@ function obterPontoCentralFeature(feature: GeoFeature): [number, number] {
   return pontos[Math.floor(pontos.length / 2)];
 }
 
+function aguardarProximoFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => setTimeout(resolve, 40));
+  });
+}
+
 function obterCategoriaItem(p: Record<string, any>): string {
   if (p._camadaOrigem === 'Malha Rodoviária') {
     const jurBruta =
@@ -174,6 +181,31 @@ function obterSubbaciaItem(p: Record<string, any>): string {
   const valor = p.nome_subbacia_n6 ?? p.subbacia_n6 ?? p.descricao_subbacia_n6;
   if (valor === undefined || valor === null) return '';
   return String(valor).trim();
+}
+
+function ControladorFocoFeature({
+  pedidoFoco,
+}: {
+  pedidoFoco: { feature: GeoFeature; nonce: number } | null;
+}) {
+  const map = useMap();
+
+  useEffect(() => {
+    if (!map || !pedidoFoco) return;
+    const pontos = extrairTodosPontos(pedidoFoco.feature.geometry?.coordinates);
+    if (pontos.length === 0) return;
+
+    if (pontos.length === 1) {
+      map.panTo({ lat: pontos[0][1], lng: pontos[0][0] });
+      map.setZoom(16);
+    } else {
+      const bounds = new google.maps.LatLngBounds();
+      pontos.forEach(([lng, lat]) => bounds.extend({ lat, lng }));
+      map.fitBounds(bounds, 70);
+    }
+  }, [map, pedidoFoco]);
+
+  return null;
 }
 
 function BotaoAbrirStreetView({ lat, lng }: { lat: number; lng: number }) {
@@ -220,23 +252,13 @@ function BotaoAbrirStreetView({ lat, lng }: { lat: number; lng: number }) {
   );
 }
 
-function BuscaUnificadaMapa({
-  alvoBusca,
-  aoMudarAlvoBusca,
-  dadosRodovias,
-  dadosRios,
+function BuscaEnderecoGoogle({
   aoEncontrarLocal,
   aoLimparLocal,
-  aoSelecionarFeatureVetorial,
   possuiMarcador,
 }: {
-  alvoBusca: AlvoBusca;
-  aoMudarAlvoBusca: (novoAlvo: AlvoBusca) => void;
-  dadosRodovias: GeoFeature[];
-  dadosRios: GeoFeature[];
   aoEncontrarLocal: (local: LocalPesquisado) => void;
   aoLimparLocal: () => void;
-  aoSelecionarFeatureVetorial: (sel: SelecaoMapa, tipo: 'estradas' | 'rios') => void;
   possuiMarcador: boolean;
 }) {
   const map = useMap();
@@ -244,7 +266,7 @@ function BuscaUnificadaMapa({
   const geocodingLib = useMapsLibrary('geocoding');
 
   const [texto, setTexto] = useState('');
-  const [sugestoesPlaces, setSugestoesPlaces] = useState<any[]>([]);
+  const [sugestoes, setSugestoes] = useState<any[]>([]);
   const [aberto, setAberto] = useState(false);
   const tokenRef = useRef<any>(null);
   const reqIdRef = useRef(0);
@@ -259,56 +281,11 @@ function BuscaUnificadaMapa({
     return tokenRef.current;
   };
 
-  const sugestoesVetoriais = useMemo(() => {
-    if (alvoBusca === 'enderecos') return [];
-    const termo = normalizarTexto(texto.trim());
-    if (termo.length < 2) return [];
-
-    if (alvoBusca === 'estradas') {
-      return dadosRodovias
-        .filter((f) => {
-          const p = f.properties || {};
-          return (
-            normalizarTexto(p.codigo_rodovia).includes(termo) ||
-            normalizarTexto(p.tipo_jurisdicao).includes(termo) ||
-            normalizarTexto(p.administracao).includes(termo) ||
-            normalizarTexto(p.noriocomp).includes(termo) ||
-            normalizarTexto(p.id_trecho_origem).includes(termo) ||
-            normalizarTexto(obterSubbaciaItem(p)).includes(termo)
-          );
-        })
-        .slice(0, 20);
-    }
-
-    if (alvoBusca === 'rios') {
-      return dadosRios
-        .filter((f) => {
-          const p = f.properties || {};
-          return (
-            normalizarTexto(p.nome_rio).includes(termo) ||
-            normalizarTexto(p.descricao_subbacia_n6).includes(termo) ||
-            String(p.cotrecho ?? '').includes(termo) ||
-            String(p.cobacia ?? '').includes(termo)
-          );
-        })
-        .slice(0, 20);
-    }
-
-    return [];
-  }, [alvoBusca, texto, dadosRodovias, dadosRios]);
-
-  const aoDigitar = async (valor: string) => {
+  const buscarSugestoes = async (valor: string) => {
     setTexto(valor);
     const consulta = valor.trim();
-
-    if (alvoBusca !== 'enderecos') {
-      setSugestoesPlaces([]);
-      setAberto(consulta.length >= 2);
-      return;
-    }
-
     if (consulta.length < 3 || !placesLib) {
-      setSugestoesPlaces([]);
+      setSugestoes([]);
       setAberto(false);
       return;
     }
@@ -333,14 +310,14 @@ function BuscaUnificadaMapa({
         });
 
       if (reqAtual !== reqIdRef.current) return;
-      setSugestoesPlaces(suggestions || []);
+      setSugestoes(suggestions || []);
       setAberto((suggestions || []).length > 0);
     } catch (err) {
       console.error('Erro ao buscar sugestões Places API (New):', err);
     }
   };
 
-  const selecionarSugestaoPlace = async (sugestao: any) => {
+  const selecionarSugestao = async (sugestao: any) => {
     try {
       const predicao = sugestao.placePrediction;
       if (!predicao) return;
@@ -351,7 +328,7 @@ function BuscaUnificadaMapa({
       });
 
       tokenRef.current = null;
-      setSugestoesPlaces([]);
+      setSugestoes([]);
       setAberto(false);
 
       if (!place.location || !map) return;
@@ -373,41 +350,8 @@ function BuscaUnificadaMapa({
     }
   };
 
-  const selecionarItemVetorial = (feature: GeoFeature) => {
-    if (!map) return;
-    setAberto(false);
-
-    const pontos = extrairTodosPontos(feature.geometry?.coordinates);
-    if (pontos.length > 0) {
-      const bounds = new google.maps.LatLngBounds();
-      pontos.forEach(([lng, lat]) => bounds.extend({ lat, lng }));
-      map.fitBounds(bounds, 70);
-    }
-
-    const [lngCentral, latCentral] = obterPontoCentralFeature(feature);
-    const p = feature.properties || {};
-
-    if (alvoBusca === 'rios') {
-      setTexto(`${p.nome_rio || 'Rio'} (Trecho ${p.cotrecho || ''})`);
-      aoSelecionarFeatureVetorial({ feature, lat: latCentral, lng: lngCentral }, 'rios');
-    } else if (alvoBusca === 'estradas') {
-      const kmTxt =
-        p.km_inicial !== undefined ? ` - km ${Number(p.km_inicial).toFixed(1)}` : '';
-      setTexto(`${p.codigo_rodovia || 'Rodovia'}${kmTxt}`);
-      aoSelecionarFeatureVetorial({ feature, lat: latCentral, lng: lngCentral }, 'estradas');
-    }
-  };
-
-  const submeterFormulario = (e: React.FormEvent) => {
+  const buscarPorEnter = (e: React.FormEvent) => {
     e.preventDefault();
-
-    if (alvoBusca !== 'enderecos') {
-      if (sugestoesVetoriais.length > 0) {
-        selecionarItemVetorial(sugestoesVetoriais[0]);
-      }
-      return;
-    }
-
     setAberto(false);
     const consulta = texto.trim();
     if (!consulta || !geocodingLib || !map) return;
@@ -430,115 +374,45 @@ function BuscaUnificadaMapa({
     });
   };
 
-  const trocarModo = (novoModo: AlvoBusca) => {
-    aoMudarAlvoBusca(novoModo);
-    setTexto('');
-    setSugestoesPlaces([]);
-    setAberto(false);
-  };
-
-  const placeholderAtual =
-    alvoBusca === 'enderecos'
-      ? 'Pesquisar endereço ou município no Google Maps...'
-      : alvoBusca === 'estradas'
-      ? 'Pesquisar rodovia (ex: BR-470, SC-110, Federal)...'
-      : 'Pesquisar rio, sub-bacia ou código do trecho...';
-
   return (
-    <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 w-80 sm:w-[27rem] max-w-[calc(100%-9rem)]">
-      <div className="bg-white/95 backdrop-blur-sm rounded-xl shadow-md border border-slate-200 p-1.5">
-        <form onSubmit={submeterFormulario}>
-          <div className="relative flex items-center bg-slate-50 rounded-lg border border-slate-200 focus-within:bg-white focus-within:ring-2 focus-within:ring-blue-500/40 focus-within:border-blue-500 transition-all">
-            {alvoBusca === 'enderecos' && (
-              <Navigation className="w-4 h-4 text-blue-600 ml-3 shrink-0" />
-            )}
-            {alvoBusca === 'estradas' && (
-              <Route className="w-4 h-4 text-orange-600 ml-3 shrink-0" />
-            )}
-            {alvoBusca === 'rios' && <Waves className="w-4 h-4 text-sky-600 ml-3 shrink-0" />}
-
-            <input
-              type="text"
-              value={texto}
-              onChange={(e) => aoDigitar(e.target.value)}
-              onFocus={() => {
-                if (alvoBusca === 'enderecos' && sugestoesPlaces.length > 0) setAberto(true);
-                if (alvoBusca !== 'enderecos' && texto.trim().length >= 2) setAberto(true);
+    <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 w-80 sm:w-96 max-w-[calc(100%-9rem)]">
+      <form onSubmit={buscarPorEnter}>
+        <div className="relative flex items-center bg-white rounded-lg shadow-md border border-slate-200 focus-within:ring-2 focus-within:ring-blue-500/40 focus-within:border-blue-500">
+          <Navigation className="w-4 h-4 text-blue-600 ml-3 shrink-0" />
+          <input
+            type="text"
+            value={texto}
+            onChange={(e) => buscarSugestoes(e.target.value)}
+            onFocus={() => sugestoes.length > 0 && setAberto(true)}
+            placeholder="Pesquisar endereço ou município no Google Maps..."
+            className="w-full px-2.5 py-2 text-xs sm:text-sm text-slate-800 bg-transparent focus:outline-none"
+          />
+          {(texto || possuiMarcador) && (
+            <button
+              type="button"
+              onClick={() => {
+                setTexto('');
+                setSugestoes([]);
+                setAberto(false);
+                aoLimparLocal();
               }}
-              placeholder={placeholderAtual}
-              className="w-full px-2.5 py-1.5 text-xs sm:text-sm text-slate-800 bg-transparent focus:outline-none"
-            />
-            {(texto || possuiMarcador) && (
-              <button
-                type="button"
-                onClick={() => {
-                  setTexto('');
-                  setSugestoesPlaces([]);
-                  setAberto(false);
-                  aoLimparLocal();
-                }}
-                className="p-1.5 mr-1 text-slate-400 hover:text-slate-600 cursor-pointer"
-                title="Limpar pesquisa"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            )}
-          </div>
-        </form>
-
-        {/* Radio Buttons para seleção da base de pesquisa */}
-        <div className="flex items-center justify-center sm:justify-start gap-4 px-2 pt-1.5 pb-0.5 text-xs text-slate-700 select-none">
-          <span className="text-[11px] font-semibold text-slate-400 hidden sm:inline">
-            Buscar em:
-          </span>
-
-          <label className="flex items-center gap-1.5 cursor-pointer font-medium hover:text-blue-600 transition-colors">
-            <input
-              type="radio"
-              name="alvoBuscaMapa"
-              value="enderecos"
-              checked={alvoBusca === 'enderecos'}
-              onChange={() => trocarModo('enderecos')}
-              className="accent-blue-600 cursor-pointer"
-            />
-            <span>Endereços</span>
-          </label>
-
-          <label className="flex items-center gap-1.5 cursor-pointer font-medium hover:text-orange-600 transition-colors">
-            <input
-              type="radio"
-              name="alvoBuscaMapa"
-              value="estradas"
-              checked={alvoBusca === 'estradas'}
-              onChange={() => trocarModo('estradas')}
-              className="accent-orange-600 cursor-pointer"
-            />
-            <span>Estradas</span>
-          </label>
-
-          <label className="flex items-center gap-1.5 cursor-pointer font-medium hover:text-sky-600 transition-colors">
-            <input
-              type="radio"
-              name="alvoBuscaMapa"
-              value="rios"
-              checked={alvoBusca === 'rios'}
-              onChange={() => trocarModo('rios')}
-              className="accent-sky-600 cursor-pointer"
-            />
-            <span>Rios</span>
-          </label>
+              className="p-1.5 mr-1 text-slate-400 hover:text-slate-600 cursor-pointer"
+              title="Limpar endereço"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
         </div>
-      </div>
+      </form>
 
-      {/* Sugestões Google Places (Endereços) */}
-      {aberto && alvoBusca === 'enderecos' && sugestoesPlaces.length > 0 && (
+      {aberto && sugestoes.length > 0 && (
         <ul className="mt-1 bg-white rounded-lg shadow-lg border border-slate-200 max-h-60 overflow-y-auto divide-y divide-slate-100 text-xs text-slate-700">
-          {sugestoesPlaces.map((s, idx) => {
+          {sugestoes.map((s, idx) => {
             const label = s.placePrediction?.text?.toString() || 'Endereço sugerido';
             return (
               <li
                 key={s.placePrediction?.placeId || idx}
-                onClick={() => selecionarSugestaoPlace(s)}
+                onClick={() => selecionarSugestao(s)}
                 className="px-3 py-2 hover:bg-blue-50 cursor-pointer flex items-center gap-2 transition-colors"
               >
                 <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0" />
@@ -549,71 +423,6 @@ function BuscaUnificadaMapa({
           <li className="px-3 py-1 text-[10px] text-right text-slate-400 bg-slate-50 select-none">
             Google Maps
           </li>
-        </ul>
-      )}
-
-      {/* Sugestões Vetoriais (Estradas ou Rios) */}
-      {aberto && alvoBusca !== 'enderecos' && texto.trim().length >= 2 && (
-        <ul className="mt-1 bg-white rounded-lg shadow-lg border border-slate-200 max-h-64 overflow-y-auto divide-y divide-slate-100 text-xs text-slate-700">
-          {sugestoesVetoriais.length === 0 ? (
-            <li className="px-3 py-2.5 text-slate-400 text-center">
-              Nenhum trecho encontrado para &ldquo;{texto.trim()}&rdquo;.
-            </li>
-          ) : (
-            sugestoesVetoriais.map((feat, idx) => {
-              const p = feat.properties || {};
-              if (alvoBusca === 'rios') {
-                return (
-                  <li
-                    key={`rio-${p.cotrecho ?? idx}`}
-                    onClick={() => selecionarItemVetorial(feat)}
-                    className="px-3 py-2 hover:bg-sky-50 cursor-pointer transition-colors"
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-semibold text-slate-800 truncate">
-                        {p.nome_rio || 'Curso de água'}
-                      </span>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-100 text-sky-800 font-medium shrink-0">
-                        Trecho {p.cotrecho} • {p.comprimento_trecho_km ?? '—'} km
-                      </span>
-                    </div>
-                    <div className="text-[11px] text-slate-500 truncate mt-0.5">
-                      {p.descricao_subbacia_n6 || 'Sub-bacia não informada'} (Strahler{' '}
-                      {p.ordem_strahler ?? '—'})
-                    </div>
-                  </li>
-                );
-              }
-
-              return (
-                <li
-                  key={`rod-${p.id_quadradinho ?? p.id_trecho_origem ?? idx}`}
-                  onClick={() => selecionarItemVetorial(feat)}
-                  className="px-3 py-2 hover:bg-orange-50 cursor-pointer transition-colors"
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-semibold text-slate-800 truncate">
-                      {p.codigo_rodovia || 'Rodovia'}{' '}
-                      {p.km_inicial !== undefined && p.km_final !== undefined
-                        ? `(km ${Number(p.km_inicial).toFixed(1)} ao ${Number(p.km_final).toFixed(
-                            1
-                          )})`
-                        : ''}
-                    </span>
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-orange-100 text-orange-800 font-medium shrink-0">
-                      {p.tipo_jurisdicao || 'Trecho'}
-                    </span>
-                  </div>
-                  <div className="text-[11px] text-slate-500 truncate mt-0.5">
-                    Ref: {p.noriocomp || '—'} • HAND mín:{' '}
-                    {p.altura_min_acima_do_rio_m !== undefined
-                      ? `${Number(p.altura_min_acima_do_rio_m).toFixed(1)} m`
-                      : '—'}
-                  </div>
-                </li>
-              );
-            })
-          )}
         </ul>
       )}
     </div>
@@ -765,7 +574,7 @@ function CamadasDeckGL({
             const p = f.properties || {};
             const isSel =
               cotrechoSelecionado !== null && Number(p.cotrecho) === cotrechoSelecionado;
-            if (isSel) return [245, 158, 11, 255]; // Realce âmbar quando selecionado
+            if (isSel) return [245, 158, 11, 255];
             const strahler = Number(p.ordem_strahler || 1);
             return strahler >= 4 ? [2, 132, 199, 235] : [14, 165, 233, 195];
           },
@@ -884,14 +693,21 @@ export default function App() {
   const [brutoEmpresas, setBrutoEmpresas] = useState<GeoFeature[]>([]);
   const [brutoRodovias, setBrutoRodovias] = useState<GeoFeature[]>([]);
   const [brutoRios, setBrutoRios] = useState<GeoFeature[]>([]);
-  const [carregando, setCarregando] = useState(true);
+
+  // Estados independentes para carga progressiva sequencial
+  const [carregandoEmpresas, setCarregandoEmpresas] = useState(true);
+  const [carregandoRodovias, setCarregandoRodovias] = useState(false);
+  const [carregandoRios, setCarregandoRios] = useState(false);
 
   const [exibirEmpresas, setExibirEmpresas] = useState(true);
   const [exibirRodovias, setExibirRodovias] = useState(true);
   const [exibirRios, setExibirRios] = useState(true);
 
-  const [alvoBusca, setAlvoBusca] = useState<AlvoBusca>('enderecos');
   const [selecionado, setSelecionado] = useState<SelecaoMapa | null>(null);
+  const [pedidoFocoMapa, setPedidoFocoMapa] = useState<{
+    feature: GeoFeature;
+    nonce: number;
+  } | null>(null);
   const [localPesquisado, setLocalPesquisado] = useState<LocalPesquisado | null>(null);
   const [exibirInfoEndereco, setExibirInfoEndereco] = useState(false);
 
@@ -905,9 +721,13 @@ export default function App() {
   const [inclinacaoMax, setInclinacaoMax] = useState<number>(60);
   const [tetoInclinacao, setTetoInclinacao] = useState<number>(60);
 
+  // Busca nos dados próprios (barra lateral esquerda)
+  const [alvoBuscaDados, setAlvoBuscaDados] = useState<AlvoBuscaDados>('estabelecimentos');
   const [buscaPalavraChave, setBuscaPalavraChave] = useState<string>('');
 
   useEffect(() => {
+    let cancelado = false;
+
     const buscarCamada = async (
       url: string | undefined,
       nomeCamada: 'Estabelecimentos' | 'Malha Rodoviária' | 'Hidrografia (ANA)'
@@ -928,32 +748,73 @@ export default function App() {
       }
     };
 
-    Promise.all([
-      buscarCamada(GCS_EMPRESAS_URL, 'Estabelecimentos'),
-      buscarCamada(GCS_RODOVIAS_URL, 'Malha Rodoviária'),
-      buscarCamada(GCS_RIOS_URL, 'Hidrografia (ANA)'),
-    ]).then(([emp, rod, rios]) => {
-      setBrutoEmpresas(emp);
-      setBrutoRodovias(rod);
-      setBrutoRios(rios);
+    const carregarSequencialmente = async () => {
+      // 1ª Etapa: Carrega e exibe somente Estabelecimentos primeiro
+      setCarregandoEmpresas(true);
+      const emp = await buscarCamada(GCS_EMPRESAS_URL, 'Estabelecimentos');
+      if (cancelado) return;
 
-      const todas = [...emp, ...rod];
-      const cats = new Set<string>();
+      const catsEmp = new Set<string>();
       let maxInc = 45;
 
-      todas.forEach((f) => {
+      emp.forEach((f) => {
         const p = f.properties || {};
-        cats.add(obterCategoriaItem(p));
-
+        catsEmp.add(obterCategoriaItem(p));
         const inc = Number(p.Inclinaxao_graus ?? p.inclinacao_graus);
         if (!isNaN(inc) && inc > maxInc) maxInc = Math.ceil(inc);
       });
 
-      setCategoriasAtivas(Array.from(cats));
+      setBrutoEmpresas(emp);
+      setCategoriasAtivas(Array.from(catsEmp));
       setTetoInclinacao(maxInc);
       setInclinacaoMax(maxInc);
-      setCarregando(false);
-    });
+      setCarregandoEmpresas(false);
+
+      // Aguarda o navegador desenhar os estabelecimentos no mapa antes de iniciar a próxima carga
+      await aguardarProximoFrame();
+      if (cancelado) return;
+
+      // 2ª Etapa: Carrega e exibe a Malha Rodoviária
+      setCarregandoRodovias(true);
+      const rod = await buscarCamada(GCS_RODOVIAS_URL, 'Malha Rodoviária');
+      if (cancelado) return;
+
+      const catsRod = new Set<string>();
+      let novoMaxInc = maxInc;
+
+      rod.forEach((f) => {
+        const p = f.properties || {};
+        catsRod.add(obterCategoriaItem(p));
+        const inc = Number(p.Inclinaxao_graus ?? p.inclinacao_graus);
+        if (!isNaN(inc) && inc > novoMaxInc) novoMaxInc = Math.ceil(inc);
+      });
+
+      setBrutoRodovias(rod);
+      setCategoriasAtivas((prev) => Array.from(new Set([...prev, ...Array.from(catsRod)])));
+      if (novoMaxInc > maxInc) {
+        setTetoInclinacao(novoMaxInc);
+        setInclinacaoMax((atual) => (atual === maxInc ? novoMaxInc : atual));
+      }
+      setCarregandoRodovias(false);
+
+      // Aguarda o navegador desenhar as rodovias antes de carregar os rios
+      await aguardarProximoFrame();
+      if (cancelado) return;
+
+      // 3ª Etapa: Por último, carrega e exibe os Rios (ANA)
+      setCarregandoRios(true);
+      const rios = await buscarCamada(GCS_RIOS_URL, 'Hidrografia (ANA)');
+      if (cancelado) return;
+
+      setBrutoRios(rios);
+      setCarregandoRios(false);
+    };
+
+    carregarSequencialmente();
+
+    return () => {
+      cancelado = true;
+    };
   }, []);
 
   const { listaCategorias, mapaCores, listaSubbacias } = useMemo(() => {
@@ -1011,8 +872,32 @@ export default function App() {
     };
   }, [brutoEmpresas, brutoRodovias, brutoRios, exibirEmpresas, exibirRodovias, exibirRios]);
 
-  const filtrarLista = (lista: GeoFeature[], aplicarBuscaEstabelecimento: boolean) => {
-    const termo = buscaPalavraChave.trim().toLowerCase();
+  const correspondeBuscaRodovia = (p: Record<string, any>, termoNorm: string) => {
+    return (
+      normalizarTexto(p.codigo_rodovia).includes(termoNorm) ||
+      normalizarTexto(p.tipo_jurisdicao).includes(termoNorm) ||
+      normalizarTexto(p.administracao).includes(termoNorm) ||
+      normalizarTexto(p.noriocomp).includes(termoNorm) ||
+      normalizarTexto(p.id_trecho_origem).includes(termoNorm) ||
+      normalizarTexto(obterSubbaciaItem(p)).includes(termoNorm)
+    );
+  };
+
+  const correspondeBuscaRio = (p: Record<string, any>, termoNorm: string) => {
+    return (
+      normalizarTexto(p.nome_rio).includes(termoNorm) ||
+      normalizarTexto(p.descricao_subbacia_n6).includes(termoNorm) ||
+      String(p.cotrecho ?? '').includes(termoNorm) ||
+      String(p.cobacia ?? '').includes(termoNorm)
+    );
+  };
+
+  const filtrarLista = (
+    lista: GeoFeature[],
+    tipoCamada: 'estabelecimentos' | 'estradas'
+  ) => {
+    const termoNorm = normalizarTexto(buscaPalavraChave.trim());
+    const aplicarTextoNestaCamada = termoNorm !== '' && alvoBuscaDados === tipoCamada;
     const setCats = new Set(categoriasAtivas);
 
     return lista.filter((item) => {
@@ -1035,9 +920,12 @@ export default function App() {
       const incValida = isNaN(inclinacao) ? 0 : inclinacao;
       if (incValida < inclinacaoMin || incValida > inclinacaoMax) return false;
 
-      if (aplicarBuscaEstabelecimento && termo !== '') {
-        const desc = String(p.descricao_estabelecimento ?? '').toLowerCase();
-        if (!desc.includes(termo)) return false;
+      if (aplicarTextoNestaCamada) {
+        if (tipoCamada === 'estabelecimentos') {
+          if (!normalizarTexto(p.descricao_estabelecimento).includes(termoNorm)) return false;
+        } else if (tipoCamada === 'estradas') {
+          if (!correspondeBuscaRodovia(p, termoNorm)) return false;
+        }
       }
 
       return true;
@@ -1045,7 +933,7 @@ export default function App() {
   };
 
   const empresasFiltradas = useMemo(
-    () => (exibirEmpresas ? filtrarLista(brutoEmpresas, true) : []),
+    () => (exibirEmpresas ? filtrarLista(brutoEmpresas, 'estabelecimentos') : []),
     [
       brutoEmpresas,
       exibirEmpresas,
@@ -1056,11 +944,12 @@ export default function App() {
       inclinacaoMin,
       inclinacaoMax,
       buscaPalavraChave,
+      alvoBuscaDados,
     ]
   );
 
   const rodoviasFiltradas = useMemo(
-    () => (exibirRodovias ? filtrarLista(brutoRodovias, false) : []),
+    () => (exibirRodovias ? filtrarLista(brutoRodovias, 'estradas') : []),
     [
       brutoRodovias,
       exibirRodovias,
@@ -1070,21 +959,48 @@ export default function App() {
       alturaMaxCota,
       inclinacaoMin,
       inclinacaoMax,
+      buscaPalavraChave,
+      alvoBuscaDados,
     ]
   );
 
   const riosFiltrados = useMemo(() => {
     if (!exibirRios) return [];
-    if (subbaciaSelecionada === 'todas') return brutoRios;
+    const termoNorm = normalizarTexto(buscaPalavraChave.trim());
+    const aplicarTextoRio = termoNorm !== '' && alvoBuscaDados === 'rios';
+
     return brutoRios.filter((f) => {
       const p = f.properties || {};
-      return (
-        String(p.subbacia_n6 ?? '').trim() === subbaciaSelecionada ||
-        String(p.descricao_subbacia_n6 ?? '').trim() === subbaciaSelecionada ||
-        obterSubbaciaItem(p) === subbaciaSelecionada
-      );
+
+      if (subbaciaSelecionada !== 'todas') {
+        const bateSubbacia =
+          String(p.subbacia_n6 ?? '').trim() === subbaciaSelecionada ||
+          String(p.descricao_subbacia_n6 ?? '').trim() === subbaciaSelecionada ||
+          obterSubbaciaItem(p) === subbaciaSelecionada;
+        if (!bateSubbacia) return false;
+      }
+
+      if (aplicarTextoRio && !correspondeBuscaRio(p, termoNorm)) {
+        return false;
+      }
+
+      return true;
     });
-  }, [brutoRios, exibirRios, subbaciaSelecionada]);
+  }, [brutoRios, exibirRios, subbaciaSelecionada, buscaPalavraChave, alvoBuscaDados]);
+
+  const resultadosRapidosLateral = useMemo(() => {
+    const termoNorm = normalizarTexto(buscaPalavraChave.trim());
+    if (termoNorm.length < 2) return [];
+    if (alvoBuscaDados === 'estradas') return rodoviasFiltradas.slice(0, 12);
+    if (alvoBuscaDados === 'rios') return riosFiltrados.slice(0, 12);
+    return [];
+  }, [buscaPalavraChave, alvoBuscaDados, rodoviasFiltradas, riosFiltrados]);
+
+  const focarResultadoLateral = (feat: GeoFeature) => {
+    const [lng, lat] = obterPontoCentralFeature(feat);
+    setSelecionado({ feature: feat, lat, lng });
+    setPedidoFocoMapa({ feature: feat, nonce: Date.now() });
+  };
 
   const totalFiltrados =
     empresasFiltradas.length + rodoviasFiltradas.length + riosFiltrados.length;
@@ -1134,6 +1050,13 @@ export default function App() {
     return num > TETO_ALTURA_HAND ? `30 m (real: ${fmt} m)` : `${fmt} m`;
   };
 
+  const placeholderBuscaDados =
+    alvoBuscaDados === 'estabelecimentos'
+      ? 'Ex: hospital, escola, supermercado, farmácia...'
+      : alvoBuscaDados === 'estradas'
+      ? 'Ex: BR-470, SC-110, Federal, Estadual...'
+      : 'Ex: Rio Itajaí-Açu, Benedito, cód. trecho...';
+
   return (
     <APIProvider apiKey={GOOGLE_MAPS_API_KEY} language="pt-BR" region="BR">
       <div className="flex flex-col h-screen w-screen bg-slate-50 text-slate-800 font-sans overflow-hidden">
@@ -1164,10 +1087,16 @@ export default function App() {
                   : 'bg-transparent text-slate-400 hover:text-slate-200'
               }`}
             >
-              <Building2 className="w-3.5 h-3.5" />
+              {carregandoEmpresas ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Building2 className="w-3.5 h-3.5" />
+              )}
               <span>Estabelecimentos</span>
               <span className="text-[10px] opacity-80">
-                ({empresasFiltradas.length.toLocaleString('pt-BR')})
+                {carregandoEmpresas
+                  ? '(carregando...)'
+                  : `(${empresasFiltradas.length.toLocaleString('pt-BR')})`}
               </span>
             </button>
 
@@ -1179,10 +1108,18 @@ export default function App() {
                   : 'bg-transparent text-slate-400 hover:text-slate-200'
               }`}
             >
-              <Route className="w-3.5 h-3.5" />
+              {carregandoRodovias ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Route className="w-3.5 h-3.5" />
+              )}
               <span>Malha Rodoviária</span>
               <span className="text-[10px] opacity-85">
-                ({rodoviasFiltradas.length.toLocaleString('pt-BR')})
+                {carregandoRodovias
+                  ? '(carregando...)'
+                  : carregandoEmpresas
+                  ? '(aguardando)'
+                  : `(${rodoviasFiltradas.length.toLocaleString('pt-BR')})`}
               </span>
             </button>
 
@@ -1194,10 +1131,18 @@ export default function App() {
                   : 'bg-transparent text-slate-400 hover:text-slate-200'
               }`}
             >
-              <Waves className="w-3.5 h-3.5" />
+              {carregandoRios ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Waves className="w-3.5 h-3.5" />
+              )}
               <span>Rios (ANA)</span>
               <span className="text-[10px] opacity-85">
-                ({riosFiltrados.length.toLocaleString('pt-BR')})
+                {carregandoRios
+                  ? '(carregando...)'
+                  : carregandoEmpresas || carregandoRodovias
+                  ? '(aguardando)'
+                  : `(${riosFiltrados.length.toLocaleString('pt-BR')})`}
               </span>
             </button>
           </div>
@@ -1231,35 +1176,175 @@ export default function App() {
               </button>
             </div>
 
-            {carregando ? (
+            {carregandoEmpresas ? (
               <div className="flex-1 flex flex-col items-center justify-center p-8 text-center text-slate-500">
                 <div className="w-8 h-8 border-3 border-blue-600 border-t-transparent rounded-full animate-spin mb-3" />
-                <p className="text-sm font-medium">Carregando camadas vetoriais...</p>
-                <p className="text-xs text-slate-400 mt-1">Processando GeoJSON do Cloud Storage</p>
+                <p className="text-sm font-medium">Carregando estabelecimentos...</p>
+                <p className="text-xs text-slate-400 mt-1">
+                  Rodovias e rios serão carregados em seguida automaticamente
+                </p>
               </div>
             ) : (
               <div className="flex-1 overflow-y-auto p-5 space-y-6">
+                {(carregandoRodovias || carregandoRios) && (
+                  <div className="px-3 py-2 bg-blue-50 border border-blue-100 rounded-lg flex items-center gap-2 text-xs text-blue-700">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                    <span>
+                      {carregandoRodovias
+                        ? 'Carregando malha rodoviária em segundo plano...'
+                        : 'Carregando hidrografia (ANA) em segundo plano...'}
+                    </span>
+                  </div>
+                )}
+
+                {/* Busca nos Dados Próprios + Radio Buttons embaixo */}
                 <div>
                   <label className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2 flex items-center gap-1.5">
-                    <Search className="w-3.5 h-3.5" /> Descrição do Estabelecimento
+                    <Search className="w-3.5 h-3.5" /> Busca na Base de Dados
                   </label>
                   <div className="relative">
                     <input
                       type="text"
                       value={buscaPalavraChave}
                       onChange={(e) => setBuscaPalavraChave(e.target.value)}
-                      placeholder="Ex: hospital, escola, supermercado, farmácia..."
+                      placeholder={placeholderBuscaDados}
                       className="w-full pl-3 pr-8 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:border-blue-500"
                     />
                     {buscaPalavraChave && (
                       <button
                         onClick={() => setBuscaPalavraChave('')}
-                        className="absolute right-2.5 top-2.5 text-xs text-slate-400"
+                        className="absolute right-2.5 top-2.5 text-xs text-slate-400 hover:text-slate-600 cursor-pointer"
                       >
                         ✕
                       </button>
                     )}
                   </div>
+
+                  {/* Radio buttons para escolher onde buscar nos dados */}
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 mt-2.5 px-0.5 text-xs text-slate-700 select-none">
+                    <label className="flex items-center gap-1.5 cursor-pointer font-medium hover:text-blue-600 transition-colors">
+                      <input
+                        type="radio"
+                        name="alvoBuscaMeusDados"
+                        value="estabelecimentos"
+                        checked={alvoBuscaDados === 'estabelecimentos'}
+                        onChange={() => {
+                          setAlvoBuscaDados('estabelecimentos');
+                          setExibirEmpresas(true);
+                          setBuscaPalavraChave('');
+                        }}
+                        className="accent-blue-600 cursor-pointer"
+                      />
+                      <span>Estabelecimentos</span>
+                    </label>
+
+                    <label className="flex items-center gap-1.5 cursor-pointer font-medium hover:text-orange-600 transition-colors">
+                      <input
+                        type="radio"
+                        name="alvoBuscaMeusDados"
+                        value="estradas"
+                        checked={alvoBuscaDados === 'estradas'}
+                        onChange={() => {
+                          setAlvoBuscaDados('estradas');
+                          setExibirRodovias(true);
+                          setBuscaPalavraChave('');
+                        }}
+                        className="accent-orange-600 cursor-pointer"
+                      />
+                      <span>Estradas</span>
+                    </label>
+
+                    <label className="flex items-center gap-1.5 cursor-pointer font-medium hover:text-sky-600 transition-colors">
+                      <input
+                        type="radio"
+                        name="alvoBuscaMeusDados"
+                        value="rios"
+                        checked={alvoBuscaDados === 'rios'}
+                        onChange={() => {
+                          setAlvoBuscaDados('rios');
+                          setExibirRios(true);
+                          setBuscaPalavraChave('');
+                        }}
+                        className="accent-sky-600 cursor-pointer"
+                      />
+                      <span>Rios</span>
+                    </label>
+                  </div>
+
+                  {/* Lista rápida para clicar e focar quando estiver buscando Estradas ou Rios */}
+                  {alvoBuscaDados !== 'estabelecimentos' &&
+                    buscaPalavraChave.trim().length >= 2 && (
+                      <div className="mt-2 border border-slate-200 rounded-lg bg-slate-50/70 max-h-44 overflow-y-auto divide-y divide-slate-200/70 text-xs">
+                        {alvoBuscaDados === 'estradas' && carregandoRodovias ? (
+                          <div className="p-2.5 text-slate-500 text-center">
+                            Aguardando término da carga das estradas...
+                          </div>
+                        ) : alvoBuscaDados === 'rios' &&
+                          (carregandoEmpresas || carregandoRodovias || carregandoRios) &&
+                          brutoRios.length === 0 ? (
+                          <div className="p-2.5 text-slate-500 text-center">
+                            Aguardando término da carga dos rios...
+                          </div>
+                        ) : resultadosRapidosLateral.length === 0 ? (
+                          <div className="p-2.5 text-slate-400 text-center">
+                            Nenhum trecho encontrado para &ldquo;{buscaPalavraChave.trim()}&rdquo;.
+                          </div>
+                        ) : (
+                          resultadosRapidosLateral.map((feat, idx) => {
+                            const p = feat.properties || {};
+                            if (alvoBuscaDados === 'rios') {
+                              return (
+                                <button
+                                  key={`lat-rio-${p.cotrecho ?? idx}`}
+                                  type="button"
+                                  onClick={() => focarResultadoLateral(feat)}
+                                  className="w-full text-left px-2.5 py-2 hover:bg-sky-50 transition-colors cursor-pointer"
+                                >
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="font-semibold text-slate-800 truncate">
+                                      {p.nome_rio || 'Curso de água'}
+                                    </span>
+                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-100 text-sky-800 shrink-0">
+                                      Trecho {p.cotrecho}
+                                    </span>
+                                  </div>
+                                  <div className="text-[11px] text-slate-500 truncate">
+                                    {p.descricao_subbacia_n6 || '—'} •{' '}
+                                    {p.comprimento_trecho_km ?? '—'} km
+                                  </div>
+                                </button>
+                              );
+                            }
+
+                            return (
+                              <button
+                                key={`lat-rod-${p.id_quadradinho ?? p.id_trecho_origem ?? idx}`}
+                                type="button"
+                                onClick={() => focarResultadoLateral(feat)}
+                                className="w-full text-left px-2.5 py-2 hover:bg-orange-50 transition-colors cursor-pointer"
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="font-semibold text-slate-800 truncate">
+                                    {p.codigo_rodovia || 'Rodovia'}{' '}
+                                    {p.km_inicial !== undefined && p.km_final !== undefined
+                                      ? `(km ${Number(p.km_inicial).toFixed(1)}-${Number(
+                                          p.km_final
+                                        ).toFixed(1)})`
+                                      : ''}
+                                  </span>
+                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-orange-100 text-orange-800 shrink-0">
+                                    {p.tipo_jurisdicao || 'Trecho'}
+                                  </span>
+                                </div>
+                                <div className="text-[11px] text-slate-500 truncate">
+                                  Ref: {p.noriocomp || '—'}
+                                </div>
+                              </button>
+                            );
+                          })
+                        )}
+                      </div>
+                    )}
                 </div>
 
                 {(exibirRodovias || exibirRios) && (
@@ -1431,31 +1516,17 @@ export default function App() {
               streetViewControl={true}
               fullscreenControl={true}
             >
-              <BuscaUnificadaMapa
-                alvoBusca={alvoBusca}
-                aoMudarAlvoBusca={(novoAlvo) => {
-                  setAlvoBusca(novoAlvo);
-                  if (novoAlvo === 'rios') setExibirRios(true);
-                  if (novoAlvo === 'estradas') setExibirRodovias(true);
-                }}
-                dadosRodovias={brutoRodovias}
-                dadosRios={brutoRios}
+              <ControladorFocoFeature pedidoFoco={pedidoFocoMapa} />
+
+              <BuscaEnderecoGoogle
                 possuiMarcador={Boolean(localPesquisado)}
                 aoEncontrarLocal={(loc) => {
-                  setSelecionado(null);
                   setLocalPesquisado(loc);
                   setExibirInfoEndereco(true);
                 }}
                 aoLimparLocal={() => {
                   setLocalPesquisado(null);
                   setExibirInfoEndereco(false);
-                }}
-                aoSelecionarFeatureVetorial={(sel, tipo) => {
-                  setLocalPesquisado(null);
-                  setExibirInfoEndereco(false);
-                  if (tipo === 'rios') setExibirRios(true);
-                  if (tipo === 'estradas') setExibirRodovias(true);
-                  setSelecionado(sel);
                 }}
               />
 
@@ -1482,7 +1553,7 @@ export default function App() {
                 </InfoWindow>
               )}
 
-              {!carregando && (
+              {!carregandoEmpresas && (
                 <CamadasDeckGL
                   dadosEmpresas={empresasFiltradas}
                   dadosRodovias={rodoviasFiltradas}
