@@ -36,6 +36,7 @@ jobs:
           VITE_GCS_GEOJSON_URL: ${{ secrets.VITE_GCS_GEOJSON_URL }}
           VITE_GCS_DNIT_URL: ${{ secrets.VITE_GCS_DNIT_URL }}
           VITE_GCS_ANA_RIOS_URL: ${{ secrets.VITE_GCS_ANA_RIOS_URL }}
+          VITE_GCS_BNDES_URL: ${{ secrets.VITE_GCS_BNDES_URL }}
           
         run: npm run build
 
