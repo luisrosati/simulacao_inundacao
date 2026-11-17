@@ -26,13 +26,16 @@ import {
   Loader2,
   RefreshCw,
   AlertTriangle,
+  Landmark,
 } from 'lucide-react';
 
+// Leitura via variáveis de ambiente / GitHub Actions Secrets
 const GCS_EMPRESAS_URL = import.meta.env.VITE_GCS_GEOJSON_URL as string | undefined;
 const GCS_RODOVIAS_URL = (import.meta.env.VITE_GCS_RODOVIAS_URL ||
   import.meta.env.VITE_GCS_DNIT_URL) as string | undefined;
 const GCS_RIOS_URL = (import.meta.env.VITE_GCS_ANA_RIOS_URL ||
   import.meta.env.VITE_GCS_RIOS_URL) as string | undefined;
+const GCS_BNDES_URL = import.meta.env.VITE_GCS_BNDES_URL as string | undefined;
 const GOOGLE_MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string;
 
 const TETO_ALTURA_HAND = 30;
@@ -51,6 +54,18 @@ const PALETA_CORES_EMPRESAS: [number, number, number][] = [
   [245, 158, 11],
   [99, 102, 241],
   [132, 204, 22],
+];
+
+// Paleta dedicada de alto contraste para as Tabelas de Origem do BNDES (tipo_operacao)
+const PALETA_CORES_BNDES_ORIGEM: [number, number, number][] = [
+  [5, 150, 105],   // Esmeralda
+  [217, 119, 6],   // Âmbar
+  [225, 29, 72],   // Carmim
+  [79, 70, 229],   // Índigo
+  [147, 51, 234],  // Roxo
+  [8, 145, 178],   // Ciano escuro
+  [180, 83, 9],    // Terracota
+  [37, 99, 235],   // Azul Royal
 ];
 
 // ============================================================================
@@ -144,7 +159,12 @@ function normalizarUrlCamada(urlBruta: string | undefined): string {
 // ============================================================================
 // TIPAGENS E FUNÇÕES UTILITÁRIAS
 // ============================================================================
-type AlvoBuscaDados = 'estabelecimentos' | 'estradas' | 'rios';
+type AlvoBuscaDados = 'estabelecimentos' | 'estradas' | 'rios' | 'bndes';
+type NomeCamadaOrigem =
+  | 'Estabelecimentos'
+  | 'Malha Rodoviária'
+  | 'Hidrografia (ANA)'
+  | 'Operações BNDES';
 
 interface GeoFeature {
   type: 'Feature';
@@ -158,6 +178,7 @@ interface GeoFeature {
     nome_subbacia_n6?: string | number;
     Inclinaxao_graus?: number;
 
+    // Malha Rodoviária
     tipo_jurisdicao?: string;
     id_trecho_origem?: string;
     codigo_rodovia?: string;
@@ -167,7 +188,7 @@ interface GeoFeature {
     km_inicial?: number;
     km_final?: number;
     extensao_subtrecho_m?: number;
-    id_quadradinho?: string;
+    id_quadradinho?: string | number;
     subbacia_n6?: string | number;
     cobacia?: string | number;
     cotrecho?: number;
@@ -186,7 +207,7 @@ interface GeoFeature {
     altura_max_acima_do_rio_m?: number;
     cota_pista_estimada_m?: number;
 
-    // Propriedades da Hidrografia (ANA)
+    // Hidrografia (ANA)
     cocursodag?: number | string;
     nome_rio?: string;
     descricao_subbacia_n6?: string;
@@ -197,7 +218,59 @@ interface GeoFeature {
     ordem_strahler?: number;
     ordem_curso_dagua?: number;
 
-    _camadaOrigem?: 'Estabelecimentos' | 'Malha Rodoviária' | 'Hidrografia (ANA)';
+    // Operações BNDES (esquema real dados_bndes_google_maps.geojson)
+    tipo_operacao?: string;
+    tabela_origem?: string;
+    data_contratacao?: string;
+    ano?: number;
+    cnpj_cliente?: number | string;
+    cnpj_informado_bndes?: string;
+    metodo_vinculo_rfb?: string;
+    nome_cliente?: string;
+    razao_social_rfb?: string;
+    nome_fantasia?: string;
+    porte_cliente?: string;
+    porte?: string;
+    natureza_cliente?: string;
+    situacao_cadastral?: number | string;
+    data_inicio_atividade?: string;
+    data_referencia_rfb?: string;
+    valor_operacao?: number;
+    valor_desembolsado?: number;
+    taxa_juros?: number;
+    prazo_carencia?: number;
+    prazo_amortizacao?: number;
+    situacao_operacao?: string;
+    custo_financeiro?: string;
+    fonte_recurso?: string;
+    forma_apoio?: string;
+    modalidade_apoio?: string;
+    produto?: string;
+    instrumento_financeiro?: string;
+    nome_instituicao_financeira_credenciada?: string;
+    area_operacional?: string;
+    setor_bndes?: string;
+    subsetor_bndes?: string;
+    setor_cnae?: string;
+    cnae_fiscal_principal?: number | string;
+    descricao_cnae?: string;
+    tipo_logradouro?: string;
+    logradouro?: string;
+    numero?: string | number;
+    complemento?: string | null;
+    bairro?: string;
+    cep?: number | string;
+    nome_municipio?: string;
+    origem_geometria?: string;
+    detalhe_origem_geometria?: string;
+    cota_minima_inundacao_m?: number;
+    classificacao_mancha?: string;
+    fase_simulado?: string;
+    id_contrato?: string | number | null;
+    tipo_garantia?: string | null;
+    descricao_projeto?: string | null;
+
+    _camadaOrigem?: NomeCamadaOrigem;
     [key: string]: any;
   };
 }
@@ -220,6 +293,25 @@ function normalizarTexto(texto: any): string {
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase();
+}
+
+function formatarCnpj(val: any): string {
+  if (val === undefined || val === null || val === '') return '—';
+  const digitos = String(val).replace(/\D/g, '');
+  if (digitos.length === 0) return String(val);
+  const cnpj14 = digitos.padStart(14, '0');
+  if (cnpj14.length !== 14) return String(val);
+  return cnpj14.replace(
+    /^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/,
+    '$1.$2.$3/$4-$5'
+  );
+}
+
+function formatarCep(val: any): string {
+  if (val === undefined || val === null || val === '') return '';
+  const digitos = String(val).replace(/\D/g, '').padStart(8, '0');
+  if (digitos.length !== 8) return String(val);
+  return `${digitos.slice(0, 5)}-${digitos.slice(5)}`;
 }
 
 function extrairPrimeiroPonto(coords: any): [number, number] {
@@ -254,7 +346,59 @@ function aguardarProximoFrame(): Promise<void> {
   });
 }
 
+// Identifica a tabela/modalidade de origem da operação BNDES (priorizando tipo_operacao)
+function obterTabelaOrigemBndes(p: Record<string, any>): string {
+  const bruto =
+    p.tipo_operacao ??
+    p.tabela_origem ??
+    p.origem_tabela ??
+    p.tabela ??
+    p.forma_apoio;
+  const limpo = bruto !== undefined && bruto !== null ? String(bruto).trim() : '';
+  return limpo !== '' ? limpo : 'Outras Operações';
+}
+
+// Classifica o porte real da empresa (MICRO, PEQUENO, MEDIO, GRANDE)
+function obterPorteBndes(
+  p: Record<string, any>
+): { rotulo: string; nivel: 'MICRO' | 'PEQUENO' | 'MEDIO' | 'GRANDE' } {
+  const bruto = String(p.porte_cliente ?? p.porte ?? '').trim();
+  const norm = normalizarTexto(bruto).toUpperCase();
+
+  if (norm.includes('GRAND')) {
+    return { rotulo: bruto || 'GRANDE', nivel: 'GRANDE' };
+  }
+  if (norm.includes('MED')) {
+    return { rotulo: bruto || 'MÉDIO', nivel: 'MEDIO' };
+  }
+  if (norm.includes('PEQ')) {
+    return { rotulo: bruto || 'PEQUENO', nivel: 'PEQUENO' };
+  }
+  if (norm.includes('MIC') || norm.includes('MEI')) {
+    return { rotulo: bruto || 'MICRO', nivel: 'MICRO' };
+  }
+  return { rotulo: bruto || 'PEQUENO', nivel: 'PEQUENO' };
+}
+
+function obterRaioPixelsPorteBndes(p: Record<string, any>): number {
+  const { nivel } = obterPorteBndes(p);
+  if (nivel === 'GRANDE') return 11.5;
+  if (nivel === 'MEDIO') return 8;
+  if (nivel === 'PEQUENO') return 5.5;
+  return 4.2; // MICRO
+}
+
+function obterNomeClienteBndes(p: Record<string, any>): string {
+  const nome = p.nome_cliente ?? p.razao_social_rfb ?? p.nome_fantasia;
+  return nome !== undefined && nome !== null && String(nome).trim() !== ''
+    ? String(nome).trim()
+    : 'Operação BNDES';
+}
+
 function obterCategoriaItem(p: Record<string, any>): string {
+  if (p._camadaOrigem === 'Operações BNDES') {
+    return `BNDES: ${obterTabelaOrigemBndes(p)}`;
+  }
   if (p._camadaOrigem === 'Malha Rodoviária') {
     const jurBruta =
       p.tipo_jurisdicao !== undefined && p.tipo_jurisdicao !== null
@@ -272,9 +416,17 @@ function obterCategoriaItem(p: Record<string, any>): string {
 }
 
 function obterSubbaciaItem(p: Record<string, any>): string {
-  const valor = p.nome_subbacia_n6 ?? p.subbacia_n6 ?? p.descricao_subbacia_n6;
+  const valor = p.nome_subbacia_n6 ?? p.descricao_subbacia_n6 ?? p.subbacia_n6;
   if (valor === undefined || valor === null) return '';
   return String(valor).trim();
+}
+
+function bateFiltroSubbacia(p: Record<string, any>, subbaciaSelecionada: string): boolean {
+  if (subbaciaSelecionada === 'todas') return true;
+  if (obterSubbaciaItem(p) === subbaciaSelecionada) return true;
+  const codNumerico = String(p.subbacia_n6 ?? '').trim();
+  const prefixoSelecionado = subbaciaSelecionada.split(' - ')[0]?.trim();
+  return codNumerico !== '' && codNumerico === prefixoSelecionado;
 }
 
 function ControladorFocoFeature({
@@ -614,9 +766,11 @@ function CamadasDeckGL({
   dadosEmpresas,
   dadosRodovias,
   dadosRios,
+  dadosBndes,
   exibirEmpresas,
   exibirRodovias,
   exibirRios,
+  exibirBndes,
   cotrechoSelecionado,
   mapaCores,
   aoSelecionar,
@@ -624,9 +778,11 @@ function CamadasDeckGL({
   dadosEmpresas: GeoFeature[];
   dadosRodovias: GeoFeature[];
   dadosRios: GeoFeature[];
+  dadosBndes: GeoFeature[];
   exibirEmpresas: boolean;
   exibirRodovias: boolean;
   exibirRios: boolean;
+  exibirBndes: boolean;
   cotrechoSelecionado: number | null;
   mapaCores: Record<string, [number, number, number]>;
   aoSelecionar: (sel: SelecaoMapa | null) => void;
@@ -768,14 +924,56 @@ function CamadasDeckGL({
       );
     }
 
+    // Camada de Operações do BNDES:
+    // - Raio escalonado por porte_cliente (MICRO = 4.2px, PEQUENO = 5.5px, MEDIO = 8px, GRANDE = 11.5px)
+    // - Cor definida por tipo_operacao (tabela de origem)
+    if (exibirBndes && dadosBndes.length > 0) {
+      camadas.push(
+        new GeoJsonLayer({
+          id: 'camada-operacoes-bndes',
+          data: { type: 'FeatureCollection', features: dadosBndes } as any,
+          pickable: true,
+          stroked: true,
+          filled: true,
+          pointRadiusUnits: 'pixels',
+          pointRadiusMinPixels: 4,
+          pointRadiusMaxPixels: 16,
+          lineWidthUnits: 'pixels',
+          getLineWidth: 1.8,
+          getPointRadius: (f: any) => obterRaioPixelsPorteBndes(f.properties || {}),
+          getFillColor: (f: any) => {
+            const cat = obterCategoriaItem(f.properties || {});
+            const cor = mapaCores[cat] || [5, 150, 105];
+            return [cor[0], cor[1], cor[2], 235];
+          },
+          getLineColor: [15, 23, 42, 230],
+          onClick: (info: any) => {
+            if (info.object) {
+              const [lngFallback, latFallback] = extrairPrimeiroPonto(
+                info.object.geometry?.coordinates
+              );
+              const lng = info.coordinate ? info.coordinate[0] : lngFallback;
+              const lat = info.coordinate ? info.coordinate[1] : latFallback;
+              aoSelecionar({ feature: info.object, lat, lng });
+            }
+          },
+          updateTriggers: {
+            getFillColor: [mapaCores],
+          },
+        })
+      );
+    }
+
     overlayRef.current.setProps({ layers: camadas });
   }, [
     dadosEmpresas,
     dadosRodovias,
     dadosRios,
+    dadosBndes,
     exibirEmpresas,
     exibirRodovias,
     exibirRios,
+    exibirBndes,
     cotrechoSelecionado,
     mapaCores,
     aoSelecionar,
@@ -788,17 +986,22 @@ export default function App() {
   const [brutoEmpresas, setBrutoEmpresas] = useState<GeoFeature[]>([]);
   const [brutoRodovias, setBrutoRodovias] = useState<GeoFeature[]>([]);
   const [brutoRios, setBrutoRios] = useState<GeoFeature[]>([]);
+  const [brutoBndes, setBrutoBndes] = useState<GeoFeature[]>([]);
 
   // Estados independentes para carga progressiva sequencial
   const [carregandoEmpresas, setCarregandoEmpresas] = useState(true);
   const [carregandoRodovias, setCarregandoRodovias] = useState(false);
   const [carregandoRios, setCarregandoRios] = useState(false);
+  const [carregandoBndes, setCarregandoBndes] = useState(false);
+
   const [avisoRios, setAvisoRios] = useState<string | null>(null);
+  const [avisoBndes, setAvisoBndes] = useState<string | null>(null);
   const [cicloRecarga, setCicloRecarga] = useState(0);
 
   const [exibirEmpresas, setExibirEmpresas] = useState(true);
   const [exibirRodovias, setExibirRodovias] = useState(true);
   const [exibirRios, setExibirRios] = useState(true);
+  const [exibirBndes, setExibirBndes] = useState(true);
 
   const [selecionado, setSelecionado] = useState<SelecaoMapa | null>(null);
   const [pedidoFocoMapa, setPedidoFocoMapa] = useState<{
@@ -828,13 +1031,14 @@ export default function App() {
 
     const buscarCamada = async (
       urlBruta: string | undefined,
-      nomeCamada: 'Estabelecimentos' | 'Malha Rodoviária' | 'Hidrografia (ANA)'
+      nomeCamada: NomeCamadaOrigem,
+      nomeVariavelEnv: string
     ): Promise<{ features: GeoFeature[]; erro?: string }> => {
       const url = normalizarUrlCamada(urlBruta);
       if (!url) {
         return {
           features: [],
-          erro: 'Variável VITE_GCS_ANA_RIOS_URL vazia ou servidor Vite não reiniciado após editar o .env.',
+          erro: `Variável ${nomeVariavelEnv} vazia no build/ambiente (.env ou GitHub Actions Secrets).`,
         };
       }
 
@@ -851,20 +1055,16 @@ export default function App() {
         if (!res.ok) {
           return {
             features: [],
-            erro: `Falha HTTP ${res.status} ao baixar de ${url}`,
+            erro: `Falha HTTP ${res.status} ao baixar ${nomeCamada} (${url}).`,
           };
         }
 
-        // Usa text() + sanitização caso o GeoJSON exportado de Python contenha NaN/Infinity
         const textoBruto = await res.text();
         let geojson: any;
         try {
           geojson = JSON.parse(textoBruto);
         } catch {
-          const textoSanitizado = textoBruto.replace(
-            /:\s*(NaN|-?Infinity)\b/g,
-            ': null'
-          );
+          const textoSanitizado = textoBruto.replace(/:\s*(NaN|-?Infinity)\b/g, ': null');
           geojson = JSON.parse(textoSanitizado);
         }
 
@@ -884,7 +1084,7 @@ export default function App() {
         if (processados.length === 0) {
           return {
             features: [],
-            erro: 'O arquivo GeoJSON foi baixado, mas não contém features válidas.',
+            erro: `O arquivo GeoJSON de ${nomeCamada} não contém features válidas.`,
           };
         }
 
@@ -894,17 +1094,22 @@ export default function App() {
         console.error(`Erro ao carregar ${nomeCamada}:`, err);
         return {
           features: [],
-          erro: `Erro de rede/CORS ao acessar a URL dos rios (${err?.message || 'falha no fetch'}).`,
+          erro: `Erro de rede/CORS ao acessar ${nomeCamada} (${err?.message || 'falha no fetch'}).`,
         };
       }
     };
 
     const carregarSequencialmente = async () => {
       setAvisoRios(null);
+      setAvisoBndes(null);
 
-      // 1ª Etapa: Carrega e exibe somente Estabelecimentos primeiro
+      // 1ª Etapa: Estabelecimentos
       setCarregandoEmpresas(true);
-      const resEmp = await buscarCamada(GCS_EMPRESAS_URL, 'Estabelecimentos');
+      const resEmp = await buscarCamada(
+        GCS_EMPRESAS_URL,
+        'Estabelecimentos',
+        'VITE_GCS_GEOJSON_URL'
+      );
       if (cancelado) return;
 
       const emp = resEmp.features;
@@ -924,48 +1129,84 @@ export default function App() {
       setInclinacaoMax(maxInc);
       setCarregandoEmpresas(false);
 
-      // Aguarda o navegador pintar os estabelecimentos antes de iniciar as rodovias
       await aguardarProximoFrame();
       if (cancelado) return;
 
-      // 2ª Etapa: Carrega e exibe a Malha Rodoviária
+      // 2ª Etapa: Malha Rodoviária
       setCarregandoRodovias(true);
-      const resRod = await buscarCamada(GCS_RODOVIAS_URL, 'Malha Rodoviária');
+      const resRod = await buscarCamada(
+        GCS_RODOVIAS_URL,
+        'Malha Rodoviária',
+        'VITE_GCS_RODOVIAS_URL'
+      );
       if (cancelado) return;
 
       const rod = resRod.features;
       const catsRod = new Set<string>();
-      let novoMaxInc = maxInc;
+      let maxIncAposRod = maxInc;
 
       rod.forEach((f) => {
         const p = f.properties || {};
         catsRod.add(obterCategoriaItem(p));
         const inc = Number(p.Inclinaxao_graus ?? p.inclinacao_graus);
-        if (!isNaN(inc) && inc > novoMaxInc) novoMaxInc = Math.ceil(inc);
+        if (!isNaN(inc) && inc > maxIncAposRod) maxIncAposRod = Math.ceil(inc);
       });
 
       setBrutoRodovias(rod);
       setCategoriasAtivas((prev) => Array.from(new Set([...prev, ...Array.from(catsRod)])));
-      if (novoMaxInc > maxInc) {
-        setTetoInclinacao(novoMaxInc);
-        setInclinacaoMax((atual) => (atual === maxInc ? novoMaxInc : atual));
+      if (maxIncAposRod > maxInc) {
+        setTetoInclinacao(maxIncAposRod);
+        setInclinacaoMax((atual) => (atual === maxInc ? maxIncAposRod : atual));
       }
       setCarregandoRodovias(false);
 
-      // Aguarda o navegador pintar as rodovias antes de carregar os rios
       await aguardarProximoFrame();
       if (cancelado) return;
 
-      // 3ª Etapa: Por último, carrega e exibe os Rios (ANA)
+      // 3ª Etapa: Rios (ANA)
       setCarregandoRios(true);
-      const resRios = await buscarCamada(GCS_RIOS_URL, 'Hidrografia (ANA)');
+      const resRios = await buscarCamada(
+        GCS_RIOS_URL,
+        'Hidrografia (ANA)',
+        'VITE_GCS_ANA_RIOS_URL'
+      );
       if (cancelado) return;
 
       setBrutoRios(resRios.features);
-      if (resRios.erro) {
-        setAvisoRios(resRios.erro);
-      }
+      if (resRios.erro) setAvisoRios(resRios.erro);
       setCarregandoRios(false);
+
+      await aguardarProximoFrame();
+      if (cancelado) return;
+
+      // 4ª Etapa: Operações BNDES
+      setCarregandoBndes(true);
+      const resBndes = await buscarCamada(
+        GCS_BNDES_URL,
+        'Operações BNDES',
+        'VITE_GCS_BNDES_URL'
+      );
+      if (cancelado) return;
+
+      const bndes = resBndes.features;
+      const catsBndes = new Set<string>();
+      let maxIncFinal = maxIncAposRod;
+
+      bndes.forEach((f) => {
+        const p = f.properties || {};
+        catsBndes.add(obterCategoriaItem(p));
+        const inc = Number(p.Inclinaxao_graus ?? p.inclinacao_graus);
+        if (!isNaN(inc) && inc > maxIncFinal) maxIncFinal = Math.ceil(inc);
+      });
+
+      setBrutoBndes(bndes);
+      setCategoriasAtivas((prev) => Array.from(new Set([...prev, ...Array.from(catsBndes)])));
+      if (maxIncFinal > maxIncAposRod) {
+        setTetoInclinacao(maxIncFinal);
+        setInclinacaoMax((atual) => (atual === maxIncAposRod ? maxIncFinal : atual));
+      }
+      if (resBndes.erro) setAvisoBndes(resBndes.erro);
+      setCarregandoBndes(false);
     };
 
     carregarSequencialmente();
@@ -980,19 +1221,21 @@ export default function App() {
     setBrutoEmpresas([]);
     setBrutoRodovias([]);
     setBrutoRios([]);
+    setBrutoBndes([]);
     setSelecionado(null);
     setCicloRecarga((c) => c + 1);
   };
 
-  const { listaCategorias, mapaCores, listaSubbacias } = useMemo(() => {
+  const { listaCategorias, mapaCores, listaSubbacias, origensBndesCores } = useMemo(() => {
     const cats = new Set<string>();
     const bacias = new Set<string>();
-    const ativos = [
+    const ativosCategorizados = [
       ...(exibirEmpresas ? brutoEmpresas : []),
       ...(exibirRodovias ? brutoRodovias : []),
+      ...(exibirBndes ? brutoBndes : []),
     ];
 
-    ativos.forEach((f) => {
+    ativosCategorizados.forEach((f) => {
       const p = f.properties || {};
       cats.add(obterCategoriaItem(p));
       const bacia = obterSubbaciaItem(p);
@@ -1007,20 +1250,37 @@ export default function App() {
       });
     }
 
+    const grupoOrdem = (s: string) => {
+      if (s.startsWith('BNDES:')) return 0;
+      if (s.startsWith('Rodovia')) return 1;
+      return 2;
+    };
+
     const categoriasOrdenadas = Array.from(cats).sort((a, b) => {
       const strA = String(a);
       const strB = String(b);
-      const aRod = strA.startsWith('Rodovia');
-      const bRod = strB.startsWith('Rodovia');
-      if (aRod && !bRod) return -1;
-      if (!aRod && bRod) return 1;
+      const gA = grupoOrdem(strA);
+      const gB = grupoOrdem(strB);
+      if (gA !== gB) return gA - gB;
       return strA.localeCompare(strB, 'pt-BR', { numeric: true });
     });
 
     const cores: Record<string, [number, number, number]> = {};
+    const resumoOrigensBndes: { origem: string; cor: [number, number, number] }[] = [];
     let idxEmp = 0;
+    let idxBndes = 0;
+
     categoriasOrdenadas.forEach((cat) => {
-      if (CORES_FIXAS_RODOVIAS[cat]) {
+      if (cat.startsWith('BNDES:')) {
+        const corBndes =
+          PALETA_CORES_BNDES_ORIGEM[idxBndes % PALETA_CORES_BNDES_ORIGEM.length];
+        cores[cat] = corBndes;
+        resumoOrigensBndes.push({
+          origem: cat.replace(/^BNDES:\s*/, ''),
+          cor: corBndes,
+        });
+        idxBndes += 1;
+      } else if (CORES_FIXAS_RODOVIAS[cat]) {
         cores[cat] = CORES_FIXAS_RODOVIAS[cat];
       } else if (cat.startsWith('Rodovia')) {
         cores[cat] = [13, 148, 136];
@@ -1033,11 +1293,21 @@ export default function App() {
     return {
       listaCategorias: categoriasOrdenadas,
       mapaCores: cores,
+      origensBndesCores: resumoOrigensBndes,
       listaSubbacias: Array.from(bacias).sort((a, b) =>
         String(a).localeCompare(String(b), 'pt-BR', { numeric: true })
       ),
     };
-  }, [brutoEmpresas, brutoRodovias, brutoRios, exibirEmpresas, exibirRodovias, exibirRios]);
+  }, [
+    brutoEmpresas,
+    brutoRodovias,
+    brutoRios,
+    brutoBndes,
+    exibirEmpresas,
+    exibirRodovias,
+    exibirRios,
+    exibirBndes,
+  ]);
 
   const correspondeBuscaRodovia = (p: Record<string, any>, termoNorm: string) => {
     return (
@@ -1059,9 +1329,36 @@ export default function App() {
     );
   };
 
+  // Busca livre otimizada nos campos reais de Operações BNDES (ignorando WKTs geom_*)
+  const correspondeBuscaBndes = (p: Record<string, any>, termoNorm: string) => {
+    const cnpjFmt = formatarCnpj(p.cnpj_cliente);
+    return (
+      normalizarTexto(p.nome_cliente).includes(termoNorm) ||
+      normalizarTexto(p.razao_social_rfb).includes(termoNorm) ||
+      normalizarTexto(p.nome_fantasia).includes(termoNorm) ||
+      String(p.cnpj_cliente ?? '').includes(termoNorm) ||
+      cnpjFmt.includes(termoNorm) ||
+      normalizarTexto(p.tipo_operacao).includes(termoNorm) ||
+      normalizarTexto(p.porte_cliente).includes(termoNorm) ||
+      normalizarTexto(p.produto).includes(termoNorm) ||
+      normalizarTexto(p.instrumento_financeiro).includes(termoNorm) ||
+      normalizarTexto(p.nome_instituicao_financeira_credenciada).includes(termoNorm) ||
+      normalizarTexto(p.setor_bndes).includes(termoNorm) ||
+      normalizarTexto(p.subsetor_bndes).includes(termoNorm) ||
+      normalizarTexto(p.descricao_cnae).includes(termoNorm) ||
+      normalizarTexto(p.nome_municipio).includes(termoNorm) ||
+      normalizarTexto(p.bairro).includes(termoNorm) ||
+      normalizarTexto(p.logradouro).includes(termoNorm) ||
+      normalizarTexto(p.descricao_projeto).includes(termoNorm) ||
+      String(p.id_contrato ?? '').includes(termoNorm) ||
+      normalizarTexto(p.fase_simulado).includes(termoNorm) ||
+      normalizarTexto(p.classificacao_mancha).includes(termoNorm)
+    );
+  };
+
   const filtrarLista = (
     lista: GeoFeature[],
-    tipoCamada: 'estabelecimentos' | 'estradas'
+    tipoCamada: 'estabelecimentos' | 'estradas' | 'bndes'
   ) => {
     const termoNorm = normalizarTexto(buscaPalavraChave.trim());
     const aplicarTextoNestaCamada = termoNorm !== '' && alvoBuscaDados === tipoCamada;
@@ -1072,9 +1369,7 @@ export default function App() {
       const cat = obterCategoriaItem(p);
       if (!setCats.has(cat)) return false;
 
-      if (subbaciaSelecionada !== 'todas' && obterSubbaciaItem(p) !== subbaciaSelecionada) {
-        return false;
-      }
+      if (!bateFiltroSubbacia(p, subbaciaSelecionada)) return false;
 
       const alturaBruta = Number(p.altura_min_acima_do_rio_m ?? 0);
       const alturaTratada = Math.min(
@@ -1092,6 +1387,8 @@ export default function App() {
           if (!normalizarTexto(p.descricao_estabelecimento).includes(termoNorm)) return false;
         } else if (tipoCamada === 'estradas') {
           if (!correspondeBuscaRodovia(p, termoNorm)) return false;
+        } else if (tipoCamada === 'bndes') {
+          if (!correspondeBuscaBndes(p, termoNorm)) return false;
         }
       }
 
@@ -1131,6 +1428,22 @@ export default function App() {
     ]
   );
 
+  const bndesFiltrados = useMemo(
+    () => (exibirBndes ? filtrarLista(brutoBndes, 'bndes') : []),
+    [
+      brutoBndes,
+      exibirBndes,
+      categoriasAtivas,
+      subbaciaSelecionada,
+      alturaMinCota,
+      alturaMaxCota,
+      inclinacaoMin,
+      inclinacaoMax,
+      buscaPalavraChave,
+      alvoBuscaDados,
+    ]
+  );
+
   const riosFiltrados = useMemo(() => {
     if (!exibirRios) return [];
     const termoNorm = normalizarTexto(buscaPalavraChave.trim());
@@ -1138,19 +1451,8 @@ export default function App() {
 
     return brutoRios.filter((f) => {
       const p = f.properties || {};
-
-      if (subbaciaSelecionada !== 'todas') {
-        const bateSubbacia =
-          String(p.subbacia_n6 ?? '').trim() === subbaciaSelecionada ||
-          String(p.descricao_subbacia_n6 ?? '').trim() === subbaciaSelecionada ||
-          obterSubbaciaItem(p) === subbaciaSelecionada;
-        if (!bateSubbacia) return false;
-      }
-
-      if (aplicarTextoRio && !correspondeBuscaRio(p, termoNorm)) {
-        return false;
-      }
-
+      if (!bateFiltroSubbacia(p, subbaciaSelecionada)) return false;
+      if (aplicarTextoRio && !correspondeBuscaRio(p, termoNorm)) return false;
       return true;
     });
   }, [brutoRios, exibirRios, subbaciaSelecionada, buscaPalavraChave, alvoBuscaDados]);
@@ -1160,8 +1462,9 @@ export default function App() {
     if (termoNorm.length < 2) return [];
     if (alvoBuscaDados === 'estradas') return rodoviasFiltradas.slice(0, 12);
     if (alvoBuscaDados === 'rios') return riosFiltrados.slice(0, 12);
+    if (alvoBuscaDados === 'bndes') return bndesFiltrados.slice(0, 12);
     return [];
-  }, [buscaPalavraChave, alvoBuscaDados, rodoviasFiltradas, riosFiltrados]);
+  }, [buscaPalavraChave, alvoBuscaDados, rodoviasFiltradas, riosFiltrados, bndesFiltrados]);
 
   const focarResultadoLateral = (feat: GeoFeature) => {
     const [lng, lat] = obterPontoCentralFeature(feat);
@@ -1170,11 +1473,16 @@ export default function App() {
   };
 
   const totalFiltrados =
-    empresasFiltradas.length + rodoviasFiltradas.length + riosFiltrados.length;
+    empresasFiltradas.length +
+    rodoviasFiltradas.length +
+    riosFiltrados.length +
+    bndesFiltrados.length;
+
   const totalAtivosBrutos =
     (exibirEmpresas ? brutoEmpresas.length : 0) +
     (exibirRodovias ? brutoRodovias.length : 0) +
-    (exibirRios ? brutoRios.length : 0);
+    (exibirRios ? brutoRios.length : 0) +
+    (exibirBndes ? brutoBndes.length : 0);
 
   const cotrechoRioSelecionado =
     selecionado?.feature.properties?._camadaOrigem === 'Hidrografia (ANA)' &&
@@ -1190,7 +1498,7 @@ export default function App() {
 
   const resetarFiltros = () => {
     const todasCats = new Set<string>();
-    [...brutoEmpresas, ...brutoRodovias].forEach((f) => {
+    [...brutoEmpresas, ...brutoRodovias, ...brutoBndes].forEach((f) => {
       todasCats.add(obterCategoriaItem(f.properties || {}));
     });
     setCategoriasAtivas(Array.from(todasCats));
@@ -1210,11 +1518,33 @@ export default function App() {
     return `${num.toLocaleString('pt-BR', { maximumFractionDigits: casas })}${sufixo}`;
   };
 
+  const formatarMoeda = (val: any) => {
+    if (val === undefined || val === null || val === '') return '—';
+    const num = Number(val);
+    if (isNaN(num)) return String(val);
+    return num.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+  };
+
   const alturaExibidaPonto = (val: any) => {
+    if (val === undefined || val === null || val === '') return '—';
     const num = Number(val);
     if (isNaN(num)) return '—';
     const fmt = num.toLocaleString('pt-BR', { maximumFractionDigits: 2 });
     return num > TETO_ALTURA_HAND ? `30 m (real: ${fmt} m)` : `${fmt} m`;
+  };
+
+  const montarEnderecoBndes = (p: Record<string, any>) => {
+    const partesRua = [p.tipo_logradouro, p.logradouro].filter(Boolean).join(' ');
+    const numComp = [p.numero, p.complemento].filter(Boolean).join(' - ');
+    const bairroMun = [p.bairro, p.nome_municipio].filter(Boolean).join(', ');
+    const cepFmt = formatarCep(p.cep);
+    return [
+      partesRua ? `${partesRua}${numComp ? `, ${numComp}` : ''}` : '',
+      bairroMun,
+      cepFmt ? `CEP ${cepFmt}` : '',
+    ]
+      .filter(Boolean)
+      .join(' • ');
   };
 
   const placeholderBuscaDados =
@@ -1222,9 +1552,12 @@ export default function App() {
       ? 'Ex: hospital, escola, supermercado, farmácia...'
       : alvoBuscaDados === 'estradas'
       ? 'Ex: BR-470, SC-110, Federal, Estadual...'
-      : 'Ex: Rio Itajaí-Açu, Benedito, cód. trecho...';
+      : alvoBuscaDados === 'rios'
+      ? 'Ex: Rio Itajaí-Açu, Benedito, cód. trecho...'
+      : 'Ex: cliente, CNPJ, FINAME, GRANDE, Itajaí, transporte...';
 
-  const algumaCargaAtiva = carregandoEmpresas || carregandoRodovias || carregandoRios;
+  const algumaCargaAtiva =
+    carregandoEmpresas || carregandoRodovias || carregandoRios || carregandoBndes;
 
   return (
     <APIProvider apiKey={GOOGLE_MAPS_API_KEY} language="pt-BR" region="BR">
@@ -1239,7 +1572,7 @@ export default function App() {
                 Simulação de Impactos de Inundações na Bacia do Rio Itajaí
               </h1>
               <p className="text-xs text-slate-400 hidden sm:block">
-                Monitoramento geoespacial de exposição hidrodinâmica e infraestrutura viária
+                Monitoramento geoespacial de exposição hidrodinâmica, infraestrutura e operações BNDES
               </p>
             </div>
           </div>
@@ -1316,6 +1649,29 @@ export default function App() {
             </button>
 
             <button
+              onClick={() => setExibirBndes((v) => !v)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                exibirBndes
+                  ? 'bg-emerald-600 text-white shadow-sm'
+                  : 'bg-transparent text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              {carregandoBndes ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Landmark className="w-3.5 h-3.5" />
+              )}
+              <span>Operações BNDES</span>
+              <span className="text-[10px] opacity-85">
+                {carregandoBndes
+                  ? '(carregando...)'
+                  : carregandoEmpresas || carregandoRodovias || carregandoRios
+                  ? '(aguardando)'
+                  : `(${bndesFiltrados.length.toLocaleString('pt-BR')})`}
+              </span>
+            </button>
+
+            <button
               type="button"
               disabled={algumaCargaAtiva}
               onClick={forcarAtualizacaoCache}
@@ -1327,7 +1683,7 @@ export default function App() {
             </button>
           </div>
 
-          <div className="hidden xl:flex items-center gap-6 text-sm">
+          <div className="hidden 2xl:flex items-center gap-6 text-sm">
             <div className="text-right">
               <span className="text-slate-400 block text-xs">Registros Visíveis</span>
               <span className="font-semibold text-blue-400 text-base">
@@ -1361,18 +1717,20 @@ export default function App() {
                 <div className="w-8 h-8 border-3 border-blue-600 border-t-transparent rounded-full animate-spin mb-3" />
                 <p className="text-sm font-medium">Carregando estabelecimentos...</p>
                 <p className="text-xs text-slate-400 mt-1">
-                  Rodovias e rios serão carregados em seguida (com cache local IndexedDB)
+                  Rodovias, rios e BNDES serão carregados em seguida (com cache IndexedDB)
                 </p>
               </div>
             ) : (
               <div className="flex-1 overflow-y-auto p-5 space-y-6">
-                {(carregandoRodovias || carregandoRios) && (
+                {(carregandoRodovias || carregandoRios || carregandoBndes) && (
                   <div className="px-3 py-2 bg-blue-50 border border-blue-100 rounded-lg flex items-center gap-2 text-xs text-blue-700">
                     <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
                     <span>
                       {carregandoRodovias
                         ? 'Carregando malha rodoviária em segundo plano...'
-                        : 'Carregando hidrografia (ANA) em segundo plano...'}
+                        : carregandoRios
+                        ? 'Carregando hidrografia (ANA) em segundo plano...'
+                        : 'Carregando operações BNDES em segundo plano...'}
                     </span>
                   </div>
                 )}
@@ -1387,10 +1745,20 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Busca nos Dados Próprios + Radio Buttons embaixo */}
+                {avisoBndes && (
+                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800 flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                    <div>
+                      <strong className="block font-semibold">BNDES não carregado:</strong>
+                      <span>{avisoBndes}</span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Filtro Livre na Base de Dados + Radio Buttons */}
                 <div>
                   <label className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2 flex items-center gap-1.5">
-                    <Search className="w-3.5 h-3.5" /> Busca na Base de Dados
+                    <Search className="w-3.5 h-3.5" /> Filtro Livre na Base de Dados
                   </label>
                   <div className="relative">
                     <input
@@ -1411,7 +1779,7 @@ export default function App() {
                   </div>
 
                   {/* Radio buttons para escolher onde buscar nos dados */}
-                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 mt-2.5 px-0.5 text-xs text-slate-700 select-none">
+                  <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 mt-2.5 px-0.5 text-xs text-slate-700 select-none">
                     <label className="flex items-center gap-1.5 cursor-pointer font-medium hover:text-blue-600 transition-colors">
                       <input
                         type="radio"
@@ -1459,12 +1827,28 @@ export default function App() {
                       />
                       <span>Rios</span>
                     </label>
+
+                    <label className="flex items-center gap-1.5 cursor-pointer font-medium hover:text-emerald-600 transition-colors">
+                      <input
+                        type="radio"
+                        name="alvoBuscaMeusDados"
+                        value="bndes"
+                        checked={alvoBuscaDados === 'bndes'}
+                        onChange={() => {
+                          setAlvoBuscaDados('bndes');
+                          setExibirBndes(true);
+                          setBuscaPalavraChave('');
+                        }}
+                        className="accent-emerald-600 cursor-pointer"
+                      />
+                      <span>Operações BNDES</span>
+                    </label>
                   </div>
 
-                  {/* Lista rápida para clicar e focar quando estiver buscando Estradas ou Rios */}
+                  {/* Lista rápida clicável quando buscar em Estradas, Rios ou BNDES */}
                   {alvoBuscaDados !== 'estabelecimentos' &&
                     buscaPalavraChave.trim().length >= 2 && (
-                      <div className="mt-2 border border-slate-200 rounded-lg bg-slate-50/70 max-h-44 overflow-y-auto divide-y divide-slate-200/70 text-xs">
+                      <div className="mt-2 border border-slate-200 rounded-lg bg-slate-50/70 max-h-48 overflow-y-auto divide-y divide-slate-200/70 text-xs">
                         {alvoBuscaDados === 'estradas' && carregandoRodovias ? (
                           <div className="p-2.5 text-slate-500 text-center">
                             Aguardando término da carga das estradas...
@@ -1475,9 +1859,15 @@ export default function App() {
                           <div className="p-2.5 text-slate-500 text-center">
                             Aguardando término da carga dos rios...
                           </div>
+                        ) : alvoBuscaDados === 'bndes' &&
+                          algumaCargaAtiva &&
+                          brutoBndes.length === 0 ? (
+                          <div className="p-2.5 text-slate-500 text-center">
+                            Aguardando término da carga das operações BNDES...
+                          </div>
                         ) : resultadosRapidosLateral.length === 0 ? (
                           <div className="p-2.5 text-slate-400 text-center">
-                            Nenhum trecho encontrado para &ldquo;{buscaPalavraChave.trim()}&rdquo;.
+                            Nenhum registro encontrado para &ldquo;{buscaPalavraChave.trim()}&rdquo;.
                           </div>
                         ) : (
                           resultadosRapidosLateral.map((feat, idx) => {
@@ -1501,6 +1891,35 @@ export default function App() {
                                   <div className="text-[11px] text-slate-500 truncate">
                                     {p.descricao_subbacia_n6 || '—'} •{' '}
                                     {p.comprimento_trecho_km ?? '—'} km
+                                  </div>
+                                </button>
+                              );
+                            }
+
+                            if (alvoBuscaDados === 'bndes') {
+                              const { rotulo: porteRotulo } = obterPorteBndes(p);
+                              const origemTab = obterTabelaOrigemBndes(p);
+                              return (
+                                <button
+                                  key={`lat-bndes-${idx}`}
+                                  type="button"
+                                  onClick={() => focarResultadoLateral(feat)}
+                                  className="w-full text-left px-2.5 py-2 hover:bg-emerald-50 transition-colors cursor-pointer"
+                                >
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="font-semibold text-slate-800 truncate">
+                                      {obterNomeClienteBndes(p)}
+                                    </span>
+                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-semibold shrink-0">
+                                      {porteRotulo}
+                                    </span>
+                                  </div>
+                                  <div className="text-[11px] text-slate-500 truncate">
+                                    {origemTab}
+                                    {p.nome_municipio ? ` • ${p.nome_municipio}` : ''}
+                                    {p.valor_operacao !== undefined
+                                      ? ` • ${formatarMoeda(p.valor_operacao)}`
+                                      : ''}
                                   </div>
                                 </button>
                               );
@@ -1537,8 +1956,9 @@ export default function App() {
                     )}
                 </div>
 
-                {(exibirRodovias || exibirRios) && (
-                  <div className="px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1.5 text-xs">
+                {/* Legenda Visual Compacta */}
+                {(exibirRodovias || exibirRios || (exibirBndes && brutoBndes.length > 0)) && (
+                  <div className="px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl space-y-2 text-xs">
                     {exibirRodovias && (
                       <div className="flex items-center justify-between">
                         <span className="font-semibold text-slate-600">Jurisdição Viária:</span>
@@ -1561,6 +1981,55 @@ export default function App() {
                           <span className="w-4 h-1.5 rounded-full bg-sky-600 inline-block" />
                           Cursos de Água (BHO)
                         </span>
+                      </div>
+                    )}
+                    {exibirBndes && brutoBndes.length > 0 && (
+                      <div className="pt-1.5 border-t border-slate-200/80 space-y-1.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-semibold text-slate-600 shrink-0">Porte BNDES:</span>
+                          <div className="flex flex-wrap items-center justify-end gap-2 text-[10px] font-medium text-slate-700">
+                            <span className="flex items-center gap-1">
+                              <span className="w-1.5 h-1.5 rounded-full bg-slate-700 inline-block" />
+                              Micro
+                            </span>
+                            <span className="flex items-center gap-1">
+                              <span className="w-2.5 h-2.5 rounded-full bg-slate-700 inline-block" />
+                              Pequeno
+                            </span>
+                            <span className="flex items-center gap-1">
+                              <span className="w-3.5 h-3.5 rounded-full bg-slate-700 inline-block" />
+                              Médio
+                            </span>
+                            <span className="flex items-center gap-1">
+                              <span className="w-4 h-4 rounded-full bg-slate-700 inline-block" />
+                              Grande
+                            </span>
+                          </div>
+                        </div>
+
+                        {origensBndesCores.length > 0 && (
+                          <div>
+                            <span className="font-semibold text-slate-600 block mb-1">
+                              Tabela de Origem (tipo_operacao):
+                            </span>
+                            <div className="flex flex-wrap gap-1.5">
+                              {origensBndesCores.map(({ origem, cor }) => (
+                                <span
+                                  key={origem}
+                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-white border border-slate-200 text-[10px] font-medium text-slate-700"
+                                >
+                                  <span
+                                    className="w-2.5 h-2.5 rounded-full border border-slate-900/30 shrink-0"
+                                    style={{
+                                      backgroundColor: `rgb(${cor[0]}, ${cor[1]}, ${cor[2]})`,
+                                    }}
+                                  />
+                                  <span className="truncate max-w-[11rem]">{origem}</span>
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -1639,7 +2108,7 @@ export default function App() {
                 <div>
                   <div className="flex items-center justify-between mb-2">
                     <label className="text-xs font-semibold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
-                      <Layers className="w-3.5 h-3.5" /> Categorias e Jurisdições (
+                      <Layers className="w-3.5 h-3.5" /> Categorias, Origens e Jurisdições (
                       {listaCategorias.filter((c) => categoriasAtivas.includes(c)).length}/
                       {listaCategorias.length})
                     </label>
@@ -1661,6 +2130,7 @@ export default function App() {
                       const [r, g, b] = mapaCores[cat] || [100, 116, 139];
                       const ativo = categoriasAtivas.includes(cat);
                       const ehRodovia = cat.startsWith('Rodovia');
+                      const ehBndes = cat.startsWith('BNDES:');
                       return (
                         <label
                           key={cat}
@@ -1676,6 +2146,8 @@ export default function App() {
                               className={
                                 ehRodovia
                                   ? 'w-4 h-1.5 rounded-full shrink-0'
+                                  : ehBndes
+                                  ? 'w-3.5 h-3.5 rounded-full shrink-0 border-2 border-slate-900'
                                   : 'w-3.5 h-3.5 rounded-full shrink-0 border border-black/15'
                               }
                               style={{ backgroundColor: `rgb(${r}, ${g}, ${b})` }}
@@ -1748,9 +2220,11 @@ export default function App() {
                   dadosEmpresas={empresasFiltradas}
                   dadosRodovias={rodoviasFiltradas}
                   dadosRios={riosFiltrados}
+                  dadosBndes={bndesFiltrados}
                   exibirEmpresas={exibirEmpresas}
                   exibirRodovias={exibirRodovias}
                   exibirRios={exibirRios}
+                  exibirBndes={exibirBndes}
                   cotrechoSelecionado={cotrechoRioSelecionado}
                   mapaCores={mapaCores}
                   aoSelecionar={setSelecionado}
@@ -1762,20 +2236,34 @@ export default function App() {
                   position={{ lat: selecionado.lat, lng: selecionado.lng }}
                   onCloseClick={() => setSelecionado(null)}
                 >
-                  <div className="p-1 max-w-xs max-h-80 overflow-y-auto text-slate-800 text-xs space-y-1.5">
-                    <div className="flex items-center justify-between gap-2 border-b border-slate-200 pb-1">
-                      <span className="font-bold text-sm text-slate-900">
-                        {selecionado.feature.properties?._camadaOrigem === 'Hidrografia (ANA)'
-                          ? String(selecionado.feature.properties?.nome_rio || 'Curso de Água')
-                          : selecionado.feature.properties?._camadaOrigem === 'Malha Rodoviária'
-                          ? String(
-                              selecionado.feature.properties?.codigo_rodovia || 'Trecho Rodoviário'
-                            )
-                          : obterCategoriaItem(selecionado.feature.properties || {})}
-                      </span>
+                  <div className="p-1 max-w-sm max-h-88 overflow-y-auto text-slate-800 text-xs space-y-1.5">
+                    <div className="flex items-start justify-between gap-2 border-b border-slate-200 pb-1">
+                      <div>
+                        <span className="font-bold text-sm text-slate-900 block leading-snug">
+                          {selecionado.feature.properties?._camadaOrigem === 'Operações BNDES'
+                            ? obterNomeClienteBndes(selecionado.feature.properties || {})
+                            : selecionado.feature.properties?._camadaOrigem === 'Hidrografia (ANA)'
+                            ? String(selecionado.feature.properties?.nome_rio || 'Curso de Água')
+                            : selecionado.feature.properties?._camadaOrigem === 'Malha Rodoviária'
+                            ? String(
+                                selecionado.feature.properties?.codigo_rodovia ||
+                                  'Trecho Rodoviário'
+                              )
+                            : obterCategoriaItem(selecionado.feature.properties || {})}
+                        </span>
+                        {selecionado.feature.properties?._camadaOrigem === 'Operações BNDES' &&
+                          selecionado.feature.properties?.nome_fantasia && (
+                            <span className="text-[11px] text-slate-500 font-medium">
+                              Fantasia: {selecionado.feature.properties.nome_fantasia}
+                            </span>
+                          )}
+                      </div>
+
                       <span
                         className={`text-[10px] px-1.5 py-0.5 rounded font-semibold shrink-0 ${
-                          selecionado.feature.properties?._camadaOrigem === 'Hidrografia (ANA)'
+                          selecionado.feature.properties?._camadaOrigem === 'Operações BNDES'
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : selecionado.feature.properties?._camadaOrigem === 'Hidrografia (ANA)'
                             ? 'bg-sky-100 text-sky-800'
                             : selecionado.feature.properties?._camadaOrigem === 'Malha Rodoviária'
                             ? obterCategoriaItem(selecionado.feature.properties) ===
@@ -1785,7 +2273,11 @@ export default function App() {
                             : 'bg-blue-50 text-blue-700'
                         }`}
                       >
-                        {selecionado.feature.properties?._camadaOrigem === 'Hidrografia (ANA)'
+                        {selecionado.feature.properties?._camadaOrigem === 'Operações BNDES'
+                          ? `BNDES • ${
+                              obterPorteBndes(selecionado.feature.properties || {}).rotulo
+                            }`
+                          : selecionado.feature.properties?._camadaOrigem === 'Hidrografia (ANA)'
                           ? 'Hidrografia ANA'
                           : selecionado.feature.properties?._camadaOrigem === 'Malha Rodoviária'
                           ? String(selecionado.feature.properties?.tipo_jurisdicao || 'Rodovia')
@@ -1853,6 +2345,152 @@ export default function App() {
                           {selecionado.feature.properties?.ordem_strahler ?? '—'}
                         </span>
                       </div>
+                    ) : selecionado.feature.properties?._camadaOrigem === 'Operações BNDES' ? (
+                      <>
+                        {/* Bloco 1: Identificação, Origem e Valores da Operação */}
+                        <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 py-1.5 border-b border-slate-100 text-[11px]">
+                          <span className="text-slate-500">Tabela origem:</span>
+                          <span className="font-semibold text-emerald-700">
+                            {obterTabelaOrigemBndes(selecionado.feature.properties)}
+                          </span>
+
+                          <span className="text-slate-500">CNPJ / Natureza:</span>
+                          <span className="font-semibold">
+                            {formatarCnpj(selecionado.feature.properties?.cnpj_cliente)}
+                            {selecionado.feature.properties?.natureza_cliente
+                              ? ` (${selecionado.feature.properties.natureza_cliente})`
+                              : ''}
+                          </span>
+
+                          <span className="text-slate-500">Contratação / Sit.:</span>
+                          <span className="font-semibold">
+                            {selecionado.feature.properties?.data_contratacao || '—'} •{' '}
+                            {selecionado.feature.properties?.situacao_operacao || '—'}
+                          </span>
+
+                          <span className="text-slate-500">Valor operação:</span>
+                          <span className="font-semibold">
+                            {formatarMoeda(selecionado.feature.properties?.valor_operacao)}
+                          </span>
+
+                          <span className="text-slate-500">Desembolsado:</span>
+                          <span className="font-semibold">
+                            {formatarMoeda(selecionado.feature.properties?.valor_desembolsado)}
+                          </span>
+
+                          <span className="text-slate-500">Produto / Apoio:</span>
+                          <span className="font-semibold">
+                            {[
+                              selecionado.feature.properties?.produto,
+                              selecionado.feature.properties?.forma_apoio,
+                            ]
+                              .filter(Boolean)
+                              .join(' • ') || '—'}
+                          </span>
+
+                          {selecionado.feature.properties?.instrumento_financeiro && (
+                            <>
+                              <span className="text-slate-500">Instrumento:</span>
+                              <span className="font-semibold">
+                                {selecionado.feature.properties.instrumento_financeiro}
+                              </span>
+                            </>
+                          )}
+
+                          {selecionado.feature.properties
+                            ?.nome_instituicao_financeira_credenciada && (
+                            <>
+                              <span className="text-slate-500">Agente financ.:</span>
+                              <span className="font-semibold">
+                                {
+                                  selecionado.feature.properties
+                                    .nome_instituicao_financeira_credenciada
+                                }
+                              </span>
+                            </>
+                          )}
+
+                          <span className="text-slate-500">Juros / Prazos:</span>
+                          <span className="font-semibold">
+                            {formatarNum(selecionado.feature.properties?.taxa_juros, 2, '% a.a.')} (
+                            {selecionado.feature.properties?.custo_financeiro || '—'}) • Car.{' '}
+                            {formatarNum(selecionado.feature.properties?.prazo_carencia, 0, 'm')} /
+                            Amort.{' '}
+                            {formatarNum(selecionado.feature.properties?.prazo_amortizacao, 0, 'm')}
+                          </span>
+
+                          <span className="text-slate-500">Setor / CNAE:</span>
+                          <span className="font-semibold">
+                            {[
+                              selecionado.feature.properties?.subsetor_bndes ||
+                                selecionado.feature.properties?.setor_bndes,
+                              selecionado.feature.properties?.descricao_cnae,
+                            ]
+                              .filter(Boolean)
+                              .join(' — ') || '—'}
+                          </span>
+
+                          {selecionado.feature.properties?.descricao_projeto && (
+                            <>
+                              <span className="text-slate-500">Projeto:</span>
+                              <span className="font-semibold">
+                                {selecionado.feature.properties.descricao_projeto}
+                              </span>
+                            </>
+                          )}
+                        </div>
+
+                        {/* Bloco 2: Localização e Exposição Geohidrológica */}
+                        <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 pt-0.5 text-[11px]">
+                          <span className="text-slate-500">Endereço:</span>
+                          <span className="font-semibold">
+                            {montarEnderecoBndes(selecionado.feature.properties) || '—'}
+                          </span>
+
+                          <span className="text-slate-500">Precisão geom.:</span>
+                          <span className="font-semibold">
+                            {selecionado.feature.properties?.origem_geometria || '—'}
+                          </span>
+
+                          <span className="text-slate-500">HAND mín. / Rio:</span>
+                          <span className="font-semibold">
+                            {alturaExibidaPonto(
+                              selecionado.feature.properties?.altura_min_acima_do_rio_m
+                            )}{' '}
+                            ({selecionado.feature.properties?.noriocomp || '—'} a{' '}
+                            {formatarNum(selecionado.feature.properties?.dist_ate_rio_m, 0, ' m')})
+                          </span>
+
+                          {selecionado.feature.properties?.classificacao_mancha && (
+                            <>
+                              <span className="text-slate-500">Mancha inund.:</span>
+                              <span className="font-semibold">
+                                {selecionado.feature.properties.classificacao_mancha}
+                              </span>
+                            </>
+                          )}
+
+                          {selecionado.feature.properties?.fase_simulado && (
+                            <>
+                              <span className="text-slate-500">Fase simulado:</span>
+                              <span className="font-semibold">
+                                {selecionado.feature.properties.fase_simulado}
+                              </span>
+                            </>
+                          )}
+
+                          <span className="text-slate-500">Inclinação / Risco:</span>
+                          <span className="font-semibold">
+                            {formatarNum(selecionado.feature.properties?.inclinacao_graus, 1, '°')}{' '}
+                            ({selecionado.feature.properties?.classe_risco_deslizamento || '—'})
+                          </span>
+
+                          <span className="text-slate-500">Sub-bacia N6:</span>
+                          <span className="font-semibold">
+                            {obterSubbaciaItem(selecionado.feature.properties || {}) || '—'}
+                          </span>
+                        </div>
+                      </>
                     ) : (
                       <>
                         {selecionado.feature.properties?.descricao_estabelecimento && (
