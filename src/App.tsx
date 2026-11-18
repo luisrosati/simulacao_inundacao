@@ -1371,7 +1371,14 @@ export default function App() {
 
       if (!bateFiltroSubbacia(p, subbaciaSelecionada)) return false;
 
-      const alturaBruta = Number(p.altura_min_acima_do_rio_m ?? 0);
+      // Para rodovias ('estradas'), filtra pela Cota estimada pista (cota_pista_estimada_m);
+      // para estabelecimentos e BNDES, mantém o HAND mín. sobre rio (altura_min_acima_do_rio_m).
+      const valorCotaReferencia =
+        tipoCamada === 'estradas'
+          ? p.cota_pista_estimada_m ?? p.altura_min_acima_do_rio_m ?? 0
+          : p.altura_min_acima_do_rio_m ?? 0;
+
+      const alturaBruta = Number(valorCotaReferencia);
       const alturaTratada = Math.min(
         TETO_ALTURA_HAND,
         Math.max(0, isNaN(alturaBruta) ? 0 : alturaBruta)
@@ -1946,7 +1953,8 @@ export default function App() {
                                   </span>
                                 </div>
                                 <div className="text-[11px] text-slate-500 truncate">
-                                  Ref: {p.noriocomp || '—'}
+                                  Ref: {p.noriocomp || '—'} • Cota pista:{' '}
+                                  {formatarNum(p.cota_pista_estimada_m, 2, ' m')}
                                 </div>
                               </button>
                             );
@@ -2058,8 +2066,8 @@ export default function App() {
                       setAlturaMaxCota(novoMax);
                     }}
                   />
-                  <p className="text-[10px] text-slate-400 mt-1">
-                    Valores superiores a 30 m são agrupados em 30 m.
+                  <p className="text-[10px] text-slate-500 mt-1 leading-snug">
+                    Filtra o HAND mín. sobre rio (e a <strong>Cota estimada pista</strong> nas rodovias). Valores acima de 30 m são agrupados em 30 m.
                   </p>
                 </div>
 
@@ -2539,11 +2547,9 @@ export default function App() {
                             </span>
 
                             <span className="text-slate-500">Cota estimada pista:</span>
-                            <span className="font-semibold">
-                              {formatarNum(
-                                selecionado.feature.properties?.cota_pista_estimada_m,
-                                2,
-                                ' m'
+                            <span className="font-semibold text-blue-700">
+                              {alturaExibidaPonto(
+                                selecionado.feature.properties?.cota_pista_estimada_m
                               )}
                             </span>
 
